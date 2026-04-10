@@ -1,0 +1,563 @@
+<ac:structured-macro ac:name="toc" ac:schema-version="1">
+  <ac:parameter ac:name="maxLevel">3</ac:parameter>
+</ac:structured-macro>
+
+<h2>Vis&atilde;o Geral</h2>
+<p>Servi&ccedil;o Node.js/TypeScript que conecta chamadas de voz entre um <strong>browser</strong> e o <strong>WhatsApp</strong> (via Meta Cloud API) usando <strong>LiveKit</strong> como SFU (Selective Forwarding Unit) central.</p>
+<p>O <em>bridge</em> funciona como um participante server-side no room LiveKit. Ele recebe o &aacute;udio do browser via LiveKit, converte PCM para Opus/RTP e envia para a Meta via WebRTC (werift). No caminho inverso, recebe RTP/Opus da Meta, decodifica para PCM e publica no room LiveKit.</p>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">text</ac:parameter>
+  <ac:parameter ac:name="title">Fluxo de &Aacute;udio</ac:parameter>
+  <ac:plain-text-body><![CDATA[Browser (mic) → LiveKit Room → @livekit/rtc-node → Opus encode → werift RTP → Meta/WhatsApp
+Meta/WhatsApp → werift RTP → Opus decode → @livekit/rtc-node → LiveKit Room → Browser (speaker)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>Arquitetura</h2>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">text</ac:parameter>
+  <ac:parameter ac:name="title">Topologia</ac:parameter>
+  <ac:plain-text-body><![CDATA[Browser (Agent A)  <--WebRTC-->  LiveKit Server  <--rtc-node-->  Bridge  <--werift/WebRTC-->  Meta/WhatsApp (Agent B)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h3>Componentes</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Componente</th>
+      <th>Tecnologia</th>
+      <th>Descri&ccedil;&atilde;o</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Browser (Test UI)</strong></td>
+      <td>livekit-client@2, Vanilla JS</td>
+      <td>P&aacute;gina de teste em public/. Conecta ao LiveKit como &quot;browser-agent&quot;, publica microfone e reproduz &aacute;udio remoto.</td>
+    </tr>
+    <tr>
+      <td><strong>LiveKit Server</strong></td>
+      <td>WebRTC SFU, Docker</td>
+      <td>Gerencia salas WebRTC. Hospeda rooms, roteia m&iacute;dia entre browser e bridge participants. Roda em Docker (modo dev) ou LiveKit Cloud.</td>
+    </tr>
+    <tr>
+      <td><strong>Express Server</strong></td>
+      <td>Express, TypeScript</td>
+      <td>Orquestra o ciclo de vida da chamada. Gerencia sess&otilde;es em mem&oacute;ria (Map), cria rooms, gera tokens JWT e coordena bridge + Meta API.</td>
+    </tr>
+    <tr>
+      <td><strong>Call Bridge</strong></td>
+      <td>@livekit/rtc-node, werift, @discordjs/opus</td>
+      <td>M&oacute;dulo interno ao Express Server (mesmo processo). Participa do room como &quot;bridge-agent&quot;, converte PCM &harr; Opus a 48kHz/mono/20ms frames.</td>
+    </tr>
+    <tr>
+      <td><strong>Meta Graph API</strong></td>
+      <td>HTTPS, SDP, Graph API v22.0</td>
+      <td>API REST do WhatsApp Business para chamadas de voz. Recebe SDP offer para iniciar chamada e suporta terminate.</td>
+    </tr>
+    <tr>
+      <td><strong>LiveKit Egress</strong></td>
+      <td>EgressClient, Room Composite, OGG</td>
+      <td>Grava&ccedil;&atilde;o do room em formato OGG (audio only) e upload para S3. Requer S3 configurado.</td>
+    </tr>
+    <tr>
+      <td><strong>S3 Bucket</strong></td>
+      <td>AWS S3</td>
+      <td>Armazena grava&ccedil;&otilde;es em recordings/{callId}/{room}-{time}.ogg.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Stack Tecnol&oacute;gica</h2>
+<table>
+  <thead>
+    <tr>
+      <th>&Aacute;rea</th>
+      <th>Tecnologia</th>
+      <th>Vers&atilde;o</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>Runtime</td><td>Node.js + TypeScript</td><td>&ge; 18 / 5.7</td></tr>
+    <tr><td>HTTP API</td><td>Express</td><td>4.21</td></tr>
+    <tr><td>SFU</td><td>LiveKit Server</td><td>Docker latest</td></tr>
+    <tr><td>LiveKit SDK (server)</td><td>livekit-server-sdk (rooms, JWT, egress)</td><td>2.9</td></tr>
+    <tr><td>LiveKit SDK (media)</td><td>@livekit/rtc-node (PCM frames)</td><td>0.13</td></tr>
+    <tr><td>WebRTC (Meta)</td><td>werift (TypeScript puro, sem deps nativas)</td><td>0.22</td></tr>
+    <tr><td>Codec</td><td>@discordjs/opus (encode/decode Opus &harr; PCM)</td><td>0.10</td></tr>
+    <tr><td>Browser client</td><td>livekit-client (CDN jsDelivr)</td><td>2.x</td></tr>
+    <tr><td>IDs</td><td>uuid</td><td>11.x</td></tr>
+    <tr><td>Config</td><td>dotenv</td><td>16.x</td></tr>
+  </tbody>
+</table>
+
+<h2>Estrutura de Arquivos</h2>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">text</ac:parameter>
+  <ac:plain-text-body><![CDATA[voice-livekit/
+├── docker-compose.yml          # LiveKit Server local (modo dev)
+├── .env.example                # Variáveis de ambiente
+├── package.json
+├── tsconfig.json
+├── src/
+│   ├── server.ts               # Express app: CORS, rotas REST, gerencia sessões
+│   ├── config.ts               # Variáveis de ambiente tipadas
+│   ├── livekit-manager.ts      # Criação de rooms e tokens JWT
+│   ├── call-bridge.ts          # Bridge: rtc-node ↔ werift + Opus encode/decode
+│   ├── meta-api.ts             # Meta Cloud API (initiate/terminate call)
+│   ├── egress-manager.ts       # Gravação via LiveKit Egress + S3
+│   └── types.ts                # Tipos compartilhados (CallSession, DTOs)
+└── public/
+    ├── index.html              # Página de teste standalone
+    └── app.js                  # Lógica da página de teste (livekit-client)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h3>Descri&ccedil;&atilde;o dos Arquivos</h3>
+<table>
+  <thead>
+    <tr><th>Arquivo</th><th>Responsabilidade</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>src/server.ts</code></td><td>Express app principal. Configura CORS, JSON parsing, serve arquivos est&aacute;ticos de <code>public/</code>. Gerencia sess&otilde;es em <code>Map&lt;callId, CallSession&gt;</code>. Exp&otilde;e rotas REST para o ciclo de vida da chamada e endpoint <code>GET /config</code> para o frontend.</td></tr>
+    <tr><td><code>src/call-bridge.ts</code></td><td>Core do bridge bidirecional. Conecta ao LiveKit como &quot;bridge-agent&quot; via <code>@livekit/rtc-node</code>. Cria <code>RTCPeerConnection</code> do <code>werift</code> com codec Opus. Gera SDP offer com ICE gathering. Subscreve ao &aacute;udio do browser-agent, codifica PCM→Opus e envia RTP ao Meta. Recebe RTP do Meta, decodifica Opus→PCM e publica no LiveKit via <code>AudioSource.captureFrame()</code>.</td></tr>
+    <tr><td><code>src/livekit-manager.ts</code></td><td><code>RoomServiceClient</code> para criar/deletar rooms. Gera tokens JWT com <code>AccessToken</code> e grants (roomJoin, canPublish, canSubscribe) com TTL de 1h.</td></tr>
+    <tr><td><code>src/meta-api.ts</code></td><td>Fetch para Meta Graph API v22.0: <code>POST /{phoneNumberId}/calls</code> com action &quot;connect&quot; (SDP offer) e action &quot;terminate&quot;. Usa Bearer token para autentica&ccedil;&atilde;o.</td></tr>
+    <tr><td><code>src/egress-manager.ts</code></td><td><code>EgressClient</code> do <code>livekit-server-sdk</code>. Inicia grava&ccedil;&atilde;o room composite (audio only, formato OGG) com upload S3. Valida configura&ccedil;&atilde;o S3 antes de iniciar — se n&atilde;o configurado, apenas loga warning.</td></tr>
+    <tr><td><code>src/config.ts</code></td><td>Carrega <code>dotenv</code>, valida vari&aacute;veis obrigat&oacute;rias (<code>LIVEKIT_*</code>, <code>META_*</code>), exporta objeto <code>config</code> tipado com valores padr&atilde;o para opcionais.</td></tr>
+    <tr><td><code>src/types.ts</code></td><td>Define <code>CallStatus</code> (union type), <code>CallSession</code>, <code>CallBridgeHandle</code> (applyAnswer, terminate, getStatus) e DTOs de resposta da API.</td></tr>
+    <tr><td><code>public/app.js</code></td><td>Client JavaScript (vanilla, sem bundler). Conecta ao LiveKit via <code>livekit-client</code> CDN. Publica microfone local, subscreve &aacute;udio remoto, gerencia fluxo SDP manual.</td></tr>
+    <tr><td><code>public/index.html</code></td><td>P&aacute;gina de teste dark-mode. Status dots para LiveKit/Meta/Call/Mic. Campos para n&uacute;mero WhatsApp, SDP offer (readonly), SDP answer (input). Bot&otilde;es Start/Mute/Terminate/Apply.</td></tr>
+  </tbody>
+</table>
+
+<h2>API REST</h2>
+
+<h3>POST /call/start</h3>
+<p>Inicia uma chamada para um n&uacute;mero WhatsApp.</p>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">json</ac:parameter>
+  <ac:parameter ac:name="title">Request</ac:parameter>
+  <ac:plain-text-body><![CDATA[POST /call/start
+Content-Type: application/json
+
+{ "to": "5511999999999" }]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">json</ac:parameter>
+  <ac:parameter ac:name="title">Response 200</ac:parameter>
+  <ac:plain-text-body><![CDATA[{
+  "callId": "uuid",
+  "roomName": "call-uuid",
+  "token": "jwt-token-para-browser",
+  "sdpOffer": "v=0\r\n...",
+  "metaCallId": "wacid.xxx"
+}]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<p><strong>Fluxo interno:</strong></p>
+<ol>
+  <li>Cria room LiveKit (<code>call-{uuid}</code>) com <code>emptyTimeout: 300s</code></li>
+  <li>Gera token JWT para &quot;browser-agent&quot; com grants de publish/subscribe</li>
+  <li>Chama <code>createBridge(roomName)</code>:
+    <ul>
+      <li>Gera token JWT para &quot;bridge-agent&quot;</li>
+      <li>Conecta ao LiveKit como bridge-agent via <code>@livekit/rtc-node</code></li>
+      <li>Publica <code>LocalAudioTrack</code> (&quot;bridge-audio&quot;) com <code>AudioSource</code> (48kHz, 1ch)</li>
+      <li>Cria <code>RTCPeerConnection</code> (werift) com codec Opus (PT 111)</li>
+      <li>Configura transceiver sendrecv com handlers bidirecionais</li>
+      <li>Gera SDP offer e aguarda ICE gathering (timeout 10s)</li>
+    </ul>
+  </li>
+  <li>Envia SDP offer ao Meta via <code>POST /{phoneNumberId}/calls</code> com action &quot;connect&quot;</li>
+  <li>Armazena sess&atilde;o em mem&oacute;ria e retorna callId + token + sdpOffer + metaCallId</li>
+</ol>
+
+<h3>POST /call/:callId/answer</h3>
+<p>Aplica o SDP answer recebido da Meta.</p>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">json</ac:parameter>
+  <ac:parameter ac:name="title">Request</ac:parameter>
+  <ac:plain-text-body><![CDATA[POST /call/:callId/answer
+Content-Type: application/json
+
+{ "sdpAnswer": "v=0\r\n..." }]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">json</ac:parameter>
+  <ac:parameter ac:name="title">Response 200</ac:parameter>
+  <ac:plain-text-body><![CDATA[{ "status": "connected" }]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<p><strong>Fluxo interno:</strong></p>
+<ol>
+  <li>Normaliza SDP answer (literal <code>\r\n</code> → CRLF real)</li>
+  <li>Chama <code>pc.setRemoteDescription(answer)</code> no werift</li>
+  <li>Altera status da sess&atilde;o para <code>active</code></li>
+  <li>Inicia grava&ccedil;&atilde;o via Egress (se S3 configurado) — <code>startRoomCompositeEgress</code> com <code>audioOnly: true</code>, formato OGG</li>
+</ol>
+
+<h3>POST /call/:callId/terminate</h3>
+<p>Encerra a chamada completamente.</p>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">json</ac:parameter>
+  <ac:parameter ac:name="title">Response 200</ac:parameter>
+  <ac:plain-text-body><![CDATA[{ "status": "terminated" }]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<p><strong>Fluxo interno:</strong></p>
+<ol>
+  <li>Para grava&ccedil;&atilde;o via Egress (<code>stopEgress</code>)</li>
+  <li>Termina chamada no Meta (<code>POST /{phoneNumberId}/calls</code> com action &quot;terminate&quot;)</li>
+  <li>Fecha bridge: <code>pc.close()</code>, <code>localTrack.close()</code>, <code>audioSource.close()</code>, <code>room.disconnect()</code></li>
+  <li>Deleta room do LiveKit (<code>deleteRoom</code>)</li>
+  <li>Remove sess&atilde;o do Map</li>
+</ol>
+
+<h3>GET /call/:callId/status</h3>
+<p>Retorna o status atual da chamada.</p>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">json</ac:parameter>
+  <ac:parameter ac:name="title">Response 200</ac:parameter>
+  <ac:plain-text-body><![CDATA[{
+  "callId": "uuid",
+  "status": "active",
+  "roomName": "call-uuid",
+  "createdAt": "2025-01-01T00:00:00.000Z"
+}]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<p><strong>Status poss&iacute;veis:</strong> <code>creating</code> | <code>waiting_answer</code> | <code>connecting</code> | <code>active</code> | <code>terminated</code> | <code>error</code></p>
+
+<h3>GET /config</h3>
+<p>Retorna configura&ccedil;&atilde;o p&uacute;blica para o frontend.</p>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">json</ac:parameter>
+  <ac:parameter ac:name="title">Response 200</ac:parameter>
+  <ac:plain-text-body><![CDATA[{ "livekitUrl": "ws://127.0.0.1:7880" }]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>Fluxo de &Aacute;udio (Bidirecional)</h2>
+
+<h3>Browser → WhatsApp</h3>
+<ol>
+  <li><strong>Browser → LiveKit:</strong> Microfone capturado via <code>livekit-client</code>, publicado como track WebRTC para o SFU.</li>
+  <li><strong>LiveKit → Bridge:</strong> <code>@livekit/rtc-node</code> se inscreve no track do browser-agent e recebe <code>AudioFrames</code> PCM (48kHz, mono, frames de 20ms).</li>
+  <li><strong>Bridge → Meta:</strong> PCM &eacute; codificado em Opus via <code>@discordjs/opus</code> e empacotado como RTP (<code>RtpPacket</code>) pelo werift. Payload type 111, SSRC do transceiver sender.</li>
+  <li><strong>Meta → WhatsApp:</strong> Meta roteia o &aacute;udio para o usu&aacute;rio final via infraestrutura pr&oacute;pria do WhatsApp.</li>
+</ol>
+
+<h3>WhatsApp → Browser</h3>
+<ol>
+  <li><strong>WhatsApp → Meta → Bridge:</strong> RTP Opus packets recebidos pelo werift via <code>onReceiveRtp</code>.</li>
+  <li><strong>Bridge decode:</strong> Opus &eacute; decodificado para PCM via <code>@discordjs/opus</code>. Resulta em <code>Int16Array</code> (48kHz, mono).</li>
+  <li><strong>Bridge → LiveKit:</strong> PCM &eacute; publicado via <code>AudioSource.captureFrame(AudioFrame)</code> como &quot;bridge-audio&quot; track.</li>
+  <li><strong>LiveKit → Browser:</strong> O SFU entrega o track remoto ao browser via WebRTC. O <code>livekit-client</code> atribui um elemento <code>&lt;audio&gt;</code>.</li>
+</ol>
+
+<h2>Diagrama de Sequ&ecirc;ncia</h2>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">text</ac:parameter>
+  <ac:parameter ac:name="title">Ciclo Completo da Chamada</ac:parameter>
+  <ac:plain-text-body><![CDATA[Browser              Node.js Server           LiveKit              Meta / WhatsApp
+  │                      │                      │                      │
+  │ ── FASE 1: POST /call/start ──────────────────────────────────────│
+  │                      │                      │                      │
+  │  POST /call/start    │                      │                      │
+  │─────────────────────>│                      │                      │
+  │                      │  createRoom()        │                      │
+  │                      │─────────────────────>│                      │
+  │                      │  generateToken()     │                      │
+  │                      │─────────────────────>│                      │
+  │                      │                      │                      │
+  │                      │──┐ createBridge()    │                      │
+  │                      │  │ init werift+opus  │                      │
+  │                      │<─┘                   │                      │
+  │                      │                      │                      │
+  │                      │  room.connect()      │                      │
+  │                      │  + publishTrack      │                      │
+  │                      │─────────────────────>│                      │
+  │                      │                      │                      │
+  │                      │──┐ createOffer()     │                      │
+  │                      │  │ + ICE gathering   │                      │
+  │                      │<─┘                   │                      │
+  │                      │                      │                      │
+  │                      │  initiateCall(to, sdpOffer)                 │
+  │                      │────────────────────────────────────────────>│
+  │                      │                      │                      │
+  │  {callId, token,     │                      │                      │
+  │   sdpOffer, metaId}  │                      │                      │
+  │<─────────────────────│                      │                      │
+  │                      │                      │                      │
+  │  Room.connect(url, token) + publish mic     │                      │
+  │────────────────────────────────────────────>│                      │
+  │                      │                      │                      │
+  │ ── FASE 2: POST /call/:id/answer ─────────────────────────────────│
+  │                      │                      │                      │
+  │  POST /call/:id/answer {sdpAnswer}          │                      │
+  │─────────────────────>│                      │                      │
+  │                      │──┐ applyAnswer()     │                      │
+  │                      │  │ setRemoteDesc()   │                      │
+  │                      │<─┘                   │                      │
+  │                      │                      │                      │
+  │                      │  startRecording()    │                      │
+  │                      │─────────────────────>│  → Egress OGG → S3  │
+  │                      │                      │                      │
+  │  {status: connected} │                      │                      │
+  │<─────────────────────│                      │                      │
+  │                      │                      │                      │
+  │ ── FASE 3: Chamada Ativa (áudio bidirecional) ────────────────────│
+  │                      │                      │                      │
+  │  audio track (mic)   │                      │                      │
+  │─────────────────────────────────────────── >│                      │
+  │                      │  trackSubscribed     │                      │
+  │                      │  → PCM AudioStream   │                      │
+  │                      │<─────────────────────│                      │
+  │                      │                      │                      │
+  │                      │  Opus encode → RTP (werift)                 │
+  │                      │────────────────────────────────────────────>│
+  │                      │                      │                      │
+  │                      │  RTP Opus packets (werift)                  │
+  │                      │<────────────────────────────────────────────│
+  │                      │                      │                      │
+  │                      │  Opus decode →       │                      │
+  │                      │  captureFrame(PCM)   │                      │
+  │                      │─────────────────────>│                      │
+  │                      │                      │                      │
+  │  remote audio track  │                      │                      │
+  │<─────────────────────────────────────────── │                      │
+  │                      │                      │                      │
+  │ ── FASE 4: POST /call/:id/terminate ──────────────────────────────│
+  │                      │                      │                      │
+  │  POST /call/:id/terminate                   │                      │
+  │─────────────────────>│                      │                      │
+  │                      │  stopRecording()     │                      │
+  │                      │─────────────────────>│                      │
+  │                      │                      │                      │
+  │                      │  terminateCall(metaCallId)                  │
+  │                      │────────────────────────────────────────────>│
+  │                      │                      │                      │
+  │                      │──┐ pc.close()        │                      │
+  │                      │  │ room.disconnect() │                      │
+  │                      │<─┘                   │                      │
+  │                      │                      │                      │
+  │                      │  deleteRoom()        │                      │
+  │                      │─────────────────────>│                      │
+  │                      │                      │                      │
+  │ {status: terminated} │                      │                      │
+  │<─────────────────────│                      │                      │]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>Configura&ccedil;&atilde;o</h2>
+
+<h3>Vari&aacute;veis de Ambiente</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Vari&aacute;vel</th>
+      <th>Descri&ccedil;&atilde;o</th>
+      <th>Obrigat&oacute;rio</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td><code>PORT</code></td><td>Porta do servidor HTTP</td><td>N&atilde;o</td><td>3000</td></tr>
+    <tr><td><code>LIVEKIT_URL</code></td><td>URL WebSocket do LiveKit Server</td><td>Sim</td><td>—</td></tr>
+    <tr><td><code>LIVEKIT_API_KEY</code></td><td>API Key do LiveKit</td><td>Sim</td><td>—</td></tr>
+    <tr><td><code>LIVEKIT_API_SECRET</code></td><td>API Secret do LiveKit</td><td>Sim</td><td>—</td></tr>
+    <tr><td><code>LIVEKIT_PUBLIC_URL</code></td><td>URL p&uacute;blica do LiveKit para o browser</td><td>N&atilde;o</td><td><code>LIVEKIT_URL</code></td></tr>
+    <tr><td><code>META_ACCESS_TOKEN</code></td><td>Token de acesso da Meta Graph API</td><td>Sim</td><td>—</td></tr>
+    <tr><td><code>META_PHONE_NUMBER_ID</code></td><td>ID do n&uacute;mero de telefone business</td><td>Sim</td><td>—</td></tr>
+    <tr><td><code>META_API_URL</code></td><td>Base URL da Graph API</td><td>N&atilde;o</td><td><code>https://graph.facebook.com/v22.0</code></td></tr>
+    <tr><td><code>S3_ACCESS_KEY</code></td><td>AWS Access Key para grava&ccedil;&atilde;o</td><td>N&atilde;o</td><td>—</td></tr>
+    <tr><td><code>S3_SECRET</code></td><td>AWS Secret Key para grava&ccedil;&atilde;o</td><td>N&atilde;o</td><td>—</td></tr>
+    <tr><td><code>S3_REGION</code></td><td>Regi&atilde;o do bucket S3</td><td>N&atilde;o</td><td><code>us-east-1</code></td></tr>
+    <tr><td><code>S3_BUCKET</code></td><td>Nome do bucket S3</td><td>N&atilde;o</td><td>—</td></tr>
+  </tbody>
+</table>
+
+<h3>Exemplo de .env</h3>
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">bash</ac:parameter>
+  <ac:plain-text-body><![CDATA[# HTTP server
+PORT=3000
+
+# LiveKit (match docker-compose dev keys)
+LIVEKIT_URL=ws://127.0.0.1:7880
+LIVEKIT_API_KEY=devkey
+LIVEKIT_API_SECRET=secret
+LIVEKIT_PUBLIC_URL=ws://127.0.0.1:7880
+
+# Meta Cloud API (WhatsApp Calling)
+META_ACCESS_TOKEN=your_meta_access_token_here
+META_PHONE_NUMBER_ID=your_phone_number_id_here
+META_API_URL=https://graph.facebook.com/v22.0
+
+# S3 Recording (opcional - LiveKit Egress)
+S3_ACCESS_KEY=
+S3_SECRET=
+S3_REGION=us-east-1
+S3_BUCKET=my-call-recordings]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>Setup e Execu&ccedil;&atilde;o</h2>
+
+<h3>Pr&eacute;-requisitos</h3>
+<ul>
+  <li>Node.js &ge; 18</li>
+  <li>Docker (para LiveKit Server local) ou conta LiveKit Cloud</li>
+  <li>Conta Meta Business com WhatsApp Calling API habilitada</li>
+  <li>(Opcional) Bucket S3 para grava&ccedil;&atilde;o de chamadas</li>
+</ul>
+
+<h3>Instala&ccedil;&atilde;o</h3>
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">bash</ac:parameter>
+  <ac:plain-text-body><![CDATA[# Instalar dependências
+npm install
+
+# Copiar e configurar variáveis de ambiente
+cp .env.example .env
+# Editar .env com suas credenciais]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h3>LiveKit Server local (Docker)</h3>
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">bash</ac:parameter>
+  <ac:plain-text-body><![CDATA[docker compose up -d]]></ac:plain-text-body>
+</ac:structured-macro>
+<p>Sobe o LiveKit Server em modo dev nas portas:</p>
+<ul>
+  <li><strong>7880</strong> — WebSocket</li>
+  <li><strong>7881</strong> — TCP</li>
+  <li><strong>7882/udp</strong> — UDP</li>
+</ul>
+<p>Credenciais dev: <code>API Key: devkey</code> / <code>Secret: secret</code></p>
+
+<h3>docker-compose.yml</h3>
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">yaml</ac:parameter>
+  <ac:plain-text-body><![CDATA[services:
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --dev
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    environment:
+      LIVEKIT_KEYS: "devkey: secret"]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h3>Executar</h3>
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">bash</ac:parameter>
+  <ac:plain-text-body><![CDATA[# Desenvolvimento (hot-reload)
+npm run dev
+
+# Produção
+npm run build
+npm start]]></ac:plain-text-body>
+</ac:structured-macro>
+<p>O servidor inicia em <code>http://localhost:3000</code> com a p&aacute;gina de teste acess&iacute;vel na raiz.</p>
+
+<h2>P&aacute;gina de Teste</h2>
+<p>Acess&iacute;vel em <code>http://localhost:3000/</code>. Usa <code>livekit-client@2</code> via CDN para conectar o browser ao room LiveKit.</p>
+
+<ac:structured-macro ac:name="info" ac:schema-version="1">
+  <ac:parameter ac:name="title">Fluxo Manual de Teste (SDP Exchange)</ac:parameter>
+  <ac:rich-text-body>
+    <p>O servi&ccedil;o <strong>n&atilde;o implementa webhook da Meta</strong> — o SDP answer &eacute; aplicado manualmente na p&aacute;gina de teste.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ol>
+  <li>Digitar o n&uacute;mero WhatsApp destino (com c&oacute;digo do pa&iacute;s, ex: <code>5511999999999</code>)</li>
+  <li>Clicar &quot;Start Call&quot; — gera SDP offer e envia &agrave; Meta automaticamente</li>
+  <li>Aguardar o webhook da Meta com o SDP answer (via ferramentas externas como Graph API Explorer)</li>
+  <li>Colar o SDP answer no campo e clicar &quot;Apply SDP Answer&quot;</li>
+  <li>A chamada fica ativa — &aacute;udio bidirecional browser &harr; WhatsApp</li>
+  <li>Clicar &quot;Terminate&quot; para encerrar</li>
+</ol>
+
+<h2>Grava&ccedil;&atilde;o (Opcional)</h2>
+<p>Se as vari&aacute;veis S3 estiverem configuradas (<code>S3_ACCESS_KEY</code>, <code>S3_SECRET</code>, <code>S3_BUCKET</code>), a grava&ccedil;&atilde;o via LiveKit Egress:</p>
+<ul>
+  <li><strong>Inicia automaticamente</strong> quando o SDP answer &eacute; aplicado (<code>POST /call/:id/answer</code>)</li>
+  <li><strong>Para automaticamente</strong> quando a chamada &eacute; terminada (<code>POST /call/:id/terminate</code>)</li>
+  <li>Formato: <strong>OGG</strong> (audio only)</li>
+  <li>Path S3: <code>s3://&lt;bucket&gt;/recordings/&lt;callId&gt;/&lt;roomName&gt;-&lt;timestamp&gt;.ogg</code></li>
+</ul>
+<p>Se S3 n&atilde;o estiver configurado, o servi&ccedil;o funciona normalmente sem grava&ccedil;&atilde;o — apenas loga um warning.</p>
+
+<h2>Detalhes T&eacute;cnicos do Bridge</h2>
+
+<h3>Par&acirc;metros de &Aacute;udio</h3>
+<table>
+  <thead>
+    <tr><th>Par&acirc;metro</th><th>Valor</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Sample Rate</td><td>48.000 Hz</td></tr>
+    <tr><td>Canais</td><td>1 (mono)</td></tr>
+    <tr><td>Frame Size</td><td>20ms (960 samples)</td></tr>
+    <tr><td>Codec</td><td>Opus (payload type 111)</td></tr>
+    <tr><td>Formato PCM</td><td>Int16 (signed 16-bit)</td></tr>
+  </tbody>
+</table>
+
+<h3>RTP</h3>
+<ul>
+  <li>Sequence number: inicializado aleatoriamente, incrementado a cada pacote</li>
+  <li>Timestamp: inicializado aleatoriamente, incrementado por <code>samplesPerChannel</code> (960 por frame de 20ms)</li>
+  <li>SSRC: obtido do <code>transceiver.sender.ssrc</code> do werift</li>
+</ul>
+
+<h3>ICE Gathering</h3>
+<ul>
+  <li>Timeout: 10 segundos</li>
+  <li>Se timeout, prossegue com candidatos parciais</li>
+  <li>O SDP offer final inclui os ICE candidates coletados</li>
+</ul>
+
+<h3>Normaliza&ccedil;&atilde;o de SDP</h3>
+<p>O SDP answer recebido da Meta pode conter escapes literais (<code>\r\n</code> como dois caracteres). A fun&ccedil;&atilde;o <code>normalizeSdp()</code> converte para CRLF real e garante terminador <code>\r\n</code> no final.</p>
+
+<h2>Limita&ccedil;&otilde;es e Notas</h2>
+
+<ac:structured-macro ac:name="warning" ac:schema-version="1">
+  <ac:parameter ac:name="title">POC — N&atilde;o adequado para produ&ccedil;&atilde;o sem modifica&ccedil;&otilde;es</ac:parameter>
+  <ac:rich-text-body>
+    <ul>
+      <li>Sess&otilde;es armazenadas <strong>em mem&oacute;ria</strong> — reiniciar o processo perde chamadas ativas</li>
+      <li><code>@livekit/rtc-node</code> est&aacute; em <strong>Developer Preview</strong></li>
+      <li><strong>Sem webhook da Meta</strong> implementado — SDP answer aplicado manualmente</li>
+      <li>Sem autentica&ccedil;&atilde;o nas rotas REST</li>
+      <li>Sem rate limiting ou circuit breaker</li>
+      <li>O <code>werift</code> &eacute; puro TypeScript (sem deps nativas) — funciona em qualquer OS mas pode ter limita&ccedil;&otilde;es de performance em produ&ccedil;&atilde;o com alto volume</li>
+    </ul>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<h2>Reposit&oacute;rio</h2>
+<p>C&oacute;digo fonte: <code>voice-livekit</code> (reposit&oacute;rio privado)</p>
+<p>Scripts npm dispon&iacute;veis:</p>
+<table>
+  <thead>
+    <tr><th>Comando</th><th>Descri&ccedil;&atilde;o</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>npm run dev</code></td><td>Inicia com hot-reload via tsx watch</td></tr>
+    <tr><td><code>npm run build</code></td><td>Compila TypeScript para dist/</td></tr>
+    <tr><td><code>npm start</code></td><td>Executa dist/server.js (produ&ccedil;&atilde;o)</td></tr>
+  </tbody>
+</table>

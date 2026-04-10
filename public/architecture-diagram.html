@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voice-LiveKit — Arquitetura</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;700&display=swap" rel="stylesheet">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #0a0a0f;
+  --surface: #12121a;
+  --surface-2: #1a1a28;
+  --border: #2a2a3a;
+  --accent-blue: #4d7cff;
+  --accent-cyan: #00d4aa;
+  --accent-orange: #ff6b35;
+  --accent-purple: #a855f7;
+  --accent-yellow: #fbbf24;
+  --text: #e8e8f0;
+  --text-dim: #8888a0;
+}
+
+html, body {
+  width: 100%; min-height: 100vh;
+  background: var(--bg);
+  font-family: 'DM Sans', sans-serif;
+  color: var(--text);
+  overflow-x: hidden;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 40px 24px 60px;
+}
+
+h1 {
+  font-family: 'Space Mono', monospace;
+  font-size: 28px;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.subtitle {
+  font-size: 14px;
+  color: var(--text-dim);
+  margin-bottom: 40px;
+  font-family: 'Space Mono', monospace;
+}
+
+.arch-wrapper {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 32px;
+}
+
+svg.arch {
+  width: 100%;
+  height: 560px;
+}
+
+.node { cursor: pointer; }
+.node:hover rect { stroke-width: 2.5; filter: brightness(1.3); }
+.node rect { rx: 10; ry: 10; stroke-width: 1.5; transition: stroke-width 0.2s, filter 0.2s; }
+.node-label { font-family: 'DM Sans', sans-serif; font-weight: 700; font-size: 13px; fill: var(--text); text-anchor: middle; pointer-events: none; }
+.node-sublabel { font-family: 'Space Mono', monospace; font-size: 9.5px; fill: var(--text-dim); text-anchor: middle; pointer-events: none; }
+.node-icon { font-size: 20px; text-anchor: middle; pointer-events: none; }
+
+.conn { stroke-width: 2; fill: none; opacity: 0.55; }
+.conn-label { font-family: 'Space Mono', monospace; font-size: 9px; fill: var(--text-dim); }
+@keyframes dashFlow { to { stroke-dashoffset: -40; } }
+.flow-anim { stroke-dasharray: 8 6; animation: dashFlow 1.5s linear infinite; }
+
+.tooltip {
+  position: fixed; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px 20px; max-width: 340px; z-index: 100;
+  pointer-events: none; opacity: 0; transform: translateY(6px);
+  transition: opacity 0.25s, transform 0.25s; box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+}
+.tooltip.visible { opacity: 1; transform: translateY(0); }
+.tooltip h3 { font-family: 'Space Mono', monospace; font-size: 13px; margin-bottom: 6px; color: var(--accent-cyan); }
+.tooltip p { font-size: 12px; color: var(--text-dim); line-height: 1.55; }
+.tooltip .tech {
+  display: inline-block; margin-top: 8px; margin-right: 6px; padding: 2px 8px;
+  border-radius: 4px; font-family: 'Space Mono', monospace; font-size: 10px;
+  background: rgba(255,255,255,0.06); color: var(--accent-cyan);
+}
+
+.legend {
+  display: flex; gap: 24px; flex-wrap: wrap; margin-top: 24px;
+  padding: 14px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+}
+.legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); }
+.legend-dot { width: 12px; height: 12px; border-radius: 3px; }
+
+.flow-section { margin-top: 32px; }
+.flow-section h2 { font-family: 'Space Mono', monospace; font-size: 16px; margin-bottom: 16px; color: var(--accent-cyan); }
+.flow-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.flow-step {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px; position: relative; transition: border-color 0.3s, transform 0.2s;
+}
+.flow-step:hover { border-color: var(--accent-blue); transform: translateY(-2px); }
+.step-num { font-family: 'Space Mono', monospace; font-size: 24px; font-weight: 700; color: var(--accent-blue); opacity: 0.25; position: absolute; top: 10px; right: 14px; }
+.step-title { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+.step-desc { font-size: 11px; color: var(--text-dim); line-height: 1.55; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
+.fade-in { animation: fadeUp 0.5s ease forwards; }
+.fade-in:nth-child(2) { animation-delay: 0.08s; }
+.fade-in:nth-child(3) { animation-delay: 0.16s; }
+.fade-in:nth-child(4) { animation-delay: 0.24s; }
+
+.file-map { margin-top: 32px; }
+.file-map h2 { font-family: 'Space Mono', monospace; font-size: 16px; margin-bottom: 16px; color: var(--accent-purple); }
+.file-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.file-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 16px; display: flex; gap: 12px; align-items: flex-start;
+  transition: border-color 0.2s;
+}
+.file-card:hover { border-color: var(--accent-purple); }
+.file-name { font-family: 'Space Mono', monospace; font-size: 12px; color: var(--accent-purple); }
+.file-desc { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+
+/* Sequence Diagram */
+.seq-wrapper {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+  padding: 32px; overflow-x: auto;
+}
+svg.seq { width: 100%; min-width: 900px; }
+.seq-lifeline { stroke: var(--border); stroke-width: 1; stroke-dasharray: 6 4; }
+.seq-head rect { rx: 8; ry: 8; stroke-width: 1.5; }
+.seq-head text { font-family: 'DM Sans', sans-serif; font-weight: 700; font-size: 12px; fill: var(--text); text-anchor: middle; }
+.seq-head .sub { font-family: 'Space Mono', monospace; font-size: 8.5px; fill: var(--text-dim); }
+.seq-msg { stroke-width: 1.5; }
+.seq-msg-label {
+  font-family: 'Space Mono', monospace; font-size: 9px; fill: var(--text);
+  dominant-baseline: middle;
+}
+.seq-phase-bg { opacity: 0.04; }
+.seq-phase-label {
+  font-family: 'Space Mono', monospace; font-size: 10px; font-weight: 700;
+  dominant-baseline: middle;
+}
+.seq-self-arrow { fill: none; stroke-width: 1.5; }
+.seq-note {
+  font-family: 'Space Mono', monospace; font-size: 8.5px; fill: var(--text-dim);
+  font-style: italic;
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1 class="fade-in">voice-livekit</h1>
+  <p class="subtitle fade-in">WhatsApp Voice Bridge — Arquitetura do Sistema</p>
+
+  <div class="arch-wrapper fade-in">
+    <svg class="arch" viewBox="0 0 1100 560">
+      <defs>
+        <marker id="a-blue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4d7cff"/></marker>
+        <marker id="a-cyan" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#00d4aa"/></marker>
+        <marker id="a-orange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#ff6b35"/></marker>
+        <marker id="a-purple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#a855f7"/></marker>
+        <marker id="a-yellow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#fbbf24"/></marker>
+      </defs>
+
+      <!-- Connections -->
+      <!-- Browser -> LiveKit (WebRTC) -->
+      <path class="conn flow-anim" d="M260,110 L430,110" stroke="#4d7cff" marker-end="url(#a-blue)"/>
+      <text class="conn-label" x="335" y="100">WebRTC / SFU</text>
+
+      <!-- LiveKit <-> Bridge (rtc-node, inside process) -->
+      <path class="conn flow-anim" d="M630,130 Q700,160 730,220" stroke="#00d4aa" marker-end="url(#a-cyan)"/>
+      <text class="conn-label" x="700" y="160">rtc-node subscribe</text>
+
+      <!-- Bridge -> Meta (werift RTP) -->
+      <path class="conn flow-anim" d="M830,310 L830,388" stroke="#ff6b35" marker-end="url(#a-orange)"/>
+      <text class="conn-label" x="845" y="355">werift RTP/Opus</text>
+
+      <!-- Meta -> WhatsApp -->
+      <path class="conn flow-anim" d="M830,468 L830,510" stroke="#ff6b35" marker-end="url(#a-orange)"/>
+
+      <!-- Express -> LiveKit (Room API) -->
+      <path class="conn" d="M560,200 Q540,175 540,160" stroke="#a855f7" stroke-dasharray="4 4" marker-end="url(#a-purple)"/>
+      <text class="conn-label" x="490" y="180">Room API / JWT</text>
+
+      <!-- Express -> Meta API (HTTPS) -->
+      <path class="conn" d="M680,340 Q750,370 770,398" stroke="#ff6b35" stroke-dasharray="4 4" marker-end="url(#a-orange)"/>
+      <text class="conn-label" x="700" y="385">HTTPS fetch</text>
+
+      <!-- Express -> Egress -->
+      <path class="conn" d="M440,340 L340,410" stroke="#fbbf24" stroke-dasharray="4 4" marker-end="url(#a-yellow)"/>
+      <text class="conn-label" x="350" y="375">Egress API</text>
+
+      <!-- Egress -> S3 -->
+      <path class="conn" d="M250,450 L175,490" stroke="#fbbf24" stroke-dasharray="4 4" marker-end="url(#a-yellow)"/>
+      <text class="conn-label" x="180" y="468">.ogg upload</text>
+
+      <!-- Browser -> Express (REST) -->
+      <path class="conn" d="M160,165 Q160,240 440,270" stroke="#a855f7" stroke-dasharray="4 4" marker-end="url(#a-purple)"/>
+      <text class="conn-label" x="235" y="240">REST /call/*</text>
+
+      <!-- NODES -->
+      <!-- Browser -->
+      <g class="node" data-id="browser">
+        <rect x="60" y="62" width="200" height="95" fill="#12121a" stroke="#4d7cff"/>
+        <text class="node-icon" x="160" y="94">🌐</text>
+        <text class="node-label" x="160" y="118">Browser (Test UI)</text>
+        <text class="node-sublabel" x="160" y="135">public/ • livekit-client</text>
+        <text class="node-sublabel" x="160" y="148">identity: browser-agent</text>
+      </g>
+
+      <!-- LiveKit Server -->
+      <g class="node" data-id="livekit">
+        <rect x="430" y="62" width="200" height="95" fill="#12121a" stroke="#4d7cff"/>
+        <text class="node-icon" x="530" y="94">🎙️</text>
+        <text class="node-label" x="530" y="118">LiveKit Server</text>
+        <text class="node-sublabel" x="530" y="135">SFU • WebRTC</text>
+        <text class="node-sublabel" x="530" y="148">Docker (dev mode)</text>
+      </g>
+
+      <!-- Node.js Process container -->
+      <rect x="420" y="190" width="500" height="180" rx="14" ry="14"
+            fill="none" stroke="#a855f7" stroke-width="1" stroke-dasharray="6 4" opacity="0.4"/>
+      <text x="440" y="210" font-family="Space Mono, monospace" font-size="10" fill="#a855f7" opacity="0.7">Node.js Process (mesmo runtime)</text>
+
+      <!-- Express Server (inside container) -->
+      <g class="node" data-id="express">
+        <rect x="440" y="220" width="240" height="130" fill="#12121a" stroke="#a855f7"/>
+        <text class="node-icon" x="560" y="254">⚙️</text>
+        <text class="node-label" x="560" y="278">Express Server</text>
+        <text class="node-sublabel" x="560" y="295">server.ts • config.ts • types.ts</text>
+        <text class="node-sublabel" x="560" y="308">livekit-manager • meta-api</text>
+        <text class="node-sublabel" x="560" y="321">egress-manager</text>
+        <text class="node-sublabel" x="560" y="340">Sessions Map (in-memory)</text>
+      </g>
+
+      <!-- Call Bridge (inside same container) -->
+      <g class="node" data-id="bridge">
+        <rect x="710" y="220" width="190" height="100" fill="#12121a" stroke="#00d4aa"/>
+        <text class="node-icon" x="805" y="252">🔄</text>
+        <text class="node-label" x="805" y="274">Call Bridge</text>
+        <text class="node-sublabel" x="805" y="291">call-bridge.ts</text>
+        <text class="node-sublabel" x="805" y="304">PCM ↔ Opus • 48kHz mono</text>
+      </g>
+
+      <!-- Internal arrow: Express -> Bridge -->
+      <path class="conn flow-anim" d="M680,280 L710,270" stroke="#00d4aa" marker-end="url(#a-cyan)" opacity="0.8"/>
+      <text class="conn-label" x="678" y="265">createBridge()</text>
+
+      <!-- Meta Graph API -->
+      <g class="node" data-id="meta">
+        <rect x="730" y="393" width="200" height="75" fill="#12121a" stroke="#ff6b35"/>
+        <text class="node-icon" x="830" y="422">📞</text>
+        <text class="node-label" x="830" y="440">Meta Graph API</text>
+        <text class="node-sublabel" x="830" y="457">WhatsApp Calling • SDP</text>
+      </g>
+
+      <!-- WhatsApp User -->
+      <g class="node" data-id="whatsapp">
+        <rect x="770" y="510" width="120" height="42" fill="#12121a" stroke="#ff6b35"/>
+        <text class="node-label" x="830" y="536">📱 Usuário WA</text>
+      </g>
+
+      <!-- LiveKit Egress -->
+      <g class="node" data-id="egress">
+        <rect x="200" y="410" width="180" height="70" fill="#12121a" stroke="#fbbf24"/>
+        <text class="node-icon" x="290" y="438">⏺</text>
+        <text class="node-label" x="290" y="456">LiveKit Egress</text>
+        <text class="node-sublabel" x="290" y="471">Gravação OGG</text>
+      </g>
+
+      <!-- S3 -->
+      <g class="node" data-id="s3">
+        <rect x="60" y="485" width="140" height="48" fill="#12121a" stroke="#fbbf24"/>
+        <text class="node-label" x="130" y="514">🗄️ S3 Bucket</text>
+      </g>
+    </svg>
+  </div>
+
+  <!-- Legend -->
+  <div class="legend fade-in">
+    <div class="legend-item"><div class="legend-dot" style="background:#4d7cff"></div>WebRTC / Mídia</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#00d4aa"></div>Bridge (PCM ↔ Opus)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#a855f7"></div>REST / Room API</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ff6b35"></div>Meta API / RTP</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#fbbf24"></div>Egress / Gravação</div>
+    <div class="legend-item">
+      <svg width="30" height="12"><line x1="0" y1="6" x2="30" y2="6" stroke="#666" stroke-width="2" stroke-dasharray="4 3"/></svg>
+      Controle (HTTP)
+    </div>
+    <div class="legend-item">
+      <svg width="30" height="12"><line x1="0" y1="6" x2="30" y2="6" stroke="#666" stroke-width="2"/></svg>
+      Dados (streaming)
+    </div>
+  </div>
+
+  <!-- Audio Flow -->
+  <div class="flow-section fade-in">
+    <h2>🔊 Fluxo de Áudio (Bidirecional)</h2>
+    <div class="flow-steps">
+      <div class="flow-step">
+        <span class="step-num">01</span>
+        <div class="step-title">Browser → LiveKit</div>
+        <div class="step-desc">Microfone capturado via livekit-client, publicado como track WebRTC para o SFU.</div>
+      </div>
+      <div class="flow-step">
+        <span class="step-num">02</span>
+        <div class="step-title">LiveKit → Bridge</div>
+        <div class="step-desc">@livekit/rtc-node se inscreve no track do browser-agent e recebe AudioFrames PCM.</div>
+      </div>
+      <div class="flow-step">
+        <span class="step-num">03</span>
+        <div class="step-title">Bridge → Meta</div>
+        <div class="step-desc">PCM é codificado em Opus via @discordjs/opus e enviado como RTP pelo werift ao Meta.</div>
+      </div>
+      <div class="flow-step">
+        <span class="step-num">04</span>
+        <div class="step-title">Meta → WhatsApp</div>
+        <div class="step-desc">Meta roteia o áudio para o usuário final via infraestrutura própria do WhatsApp.</div>
+      </div>
+      <div class="flow-step">
+        <span class="step-num">05</span>
+        <div class="step-title">Caminho Reverso</div>
+        <div class="step-desc">WA → Meta → werift RTP → Opus decode → PCM AudioSource → LiveKit SFU → Browser.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Call Lifecycle -->
+  <div class="flow-section fade-in">
+    <h2>📋 Ciclo de Vida da Chamada</h2>
+    <div class="flow-steps">
+      <div class="flow-step">
+        <span class="step-num">01</span>
+        <div class="step-title">POST /call/start</div>
+        <div class="step-desc">Cria room no LiveKit, gera tokens JWT (browser-agent + bridge-agent), inicia bridge e envia SDP offer ao Meta.</div>
+      </div>
+      <div class="flow-step">
+        <span class="step-num">02</span>
+        <div class="step-title">POST /call/:id/answer</div>
+        <div class="step-desc">Recebe SDP answer do Meta, aplica no werift para estabelecer mídia. Inicia gravação via Egress se S3 configurado.</div>
+      </div>
+      <div class="flow-step">
+        <span class="step-num">03</span>
+        <div class="step-title">Chamada Ativa</div>
+        <div class="step-desc">Áudio flui bidirecionalmente. Bridge converte PCM ↔ Opus entre LiveKit e Meta em tempo real (48kHz, mono, 20ms).</div>
+      </div>
+      <div class="flow-step">
+        <span class="step-num">04</span>
+        <div class="step-title">POST /call/:id/terminate</div>
+        <div class="step-desc">Para egress, termina chamada no Meta, destrói bridge e deleta room do LiveKit.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sequence Diagram -->
+  <div class="flow-section fade-in">
+    <h2>🔀 Diagrama de Sequência</h2>
+    <div class="seq-wrapper">
+      <svg class="seq" viewBox="0 0 960 920">
+        <defs>
+          <marker id="sa-purple" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#a855f7"/></marker>
+          <marker id="sa-blue" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#4d7cff"/></marker>
+          <marker id="sa-cyan" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#00d4aa"/></marker>
+          <marker id="sa-orange" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#ff6b35"/></marker>
+          <marker id="sa-yellow" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#fbbf24"/></marker>
+        </defs>
+
+        <!-- Participant heads: Browser=130, Server=400, LiveKit=640, Meta/WA=880 -->
+        <g class="seq-head">
+          <rect x="50" y="8" width="160" height="44" fill="#12121a" stroke="#4d7cff"/>
+          <text x="130" y="28">Browser</text>
+          <text x="130" y="42" class="sub">public/ • livekit-client</text>
+        </g>
+        <g class="seq-head">
+          <rect x="300" y="8" width="200" height="44" fill="#12121a" stroke="#a855f7"/>
+          <text x="400" y="28">Node.js Server</text>
+          <text x="400" y="42" class="sub">Express + Bridge (mesmo processo)</text>
+        </g>
+        <g class="seq-head">
+          <rect x="560" y="8" width="160" height="44" fill="#12121a" stroke="#4d7cff"/>
+          <text x="640" y="28">LiveKit</text>
+          <text x="640" y="42" class="sub">SFU Server</text>
+        </g>
+        <g class="seq-head">
+          <rect x="790" y="8" width="160" height="44" fill="#12121a" stroke="#ff6b35"/>
+          <text x="870" y="28">Meta / WhatsApp</text>
+          <text x="870" y="42" class="sub">Graph API + Usuário</text>
+        </g>
+
+        <!-- Lifelines -->
+        <line class="seq-lifeline" x1="130" y1="52" x2="130" y2="910"/>
+        <line class="seq-lifeline" x1="400" y1="52" x2="400" y2="910"/>
+        <line class="seq-lifeline" x1="640" y1="52" x2="640" y2="910"/>
+        <line class="seq-lifeline" x1="870" y1="52" x2="870" y2="910"/>
+
+        <!-- ═══ PHASE 1: Call Setup ═══ -->
+        <rect class="seq-phase-bg" x="0" y="62" width="960" height="310" fill="#a855f7"/>
+        <text class="seq-phase-label" x="14" y="80" fill="#a855f7">FASE 1 — POST /call/start</text>
+
+        <!-- 1 -->
+        <line class="seq-msg" x1="130" y1="102" x2="400" y2="102" stroke="#a855f7" marker-end="url(#sa-purple)"/>
+        <text class="seq-msg-label" x="180" y="96">POST /call/start {to}</text>
+
+        <!-- 2 -->
+        <line class="seq-msg" x1="400" y1="134" x2="640" y2="134" stroke="#a855f7" marker-end="url(#sa-purple)"/>
+        <text class="seq-msg-label" x="440" y="128">createRoom(call-{uuid})</text>
+
+        <!-- 3 -->
+        <line class="seq-msg" x1="400" y1="164" x2="640" y2="164" stroke="#a855f7" marker-end="url(#sa-purple)"/>
+        <text class="seq-msg-label" x="420" y="158">generateToken("browser-agent")</text>
+
+        <!-- 4: self — createBridge internally -->
+        <path class="seq-self-arrow" d="M400,192 L460,192 L460,212 L400,212" stroke="#00d4aa" marker-end="url(#sa-cyan)"/>
+        <text class="seq-msg-label" x="468" y="202">createBridge() — init werift + opus</text>
+
+        <!-- 5: Server -> LiveKit: connect as bridge-agent -->
+        <line class="seq-msg" x1="400" y1="238" x2="640" y2="238" stroke="#00d4aa" marker-end="url(#sa-cyan)"/>
+        <text class="seq-msg-label" x="420" y="232">room.connect("bridge-agent") + publishTrack</text>
+
+        <!-- 6: self — werift createOffer + ICE -->
+        <path class="seq-self-arrow" d="M400,262 L460,262 L460,282 L400,282" stroke="#00d4aa" marker-end="url(#sa-cyan)"/>
+        <text class="seq-msg-label" x="468" y="272">werift createOffer() + ICE gathering</text>
+
+        <!-- 7: Server -> Meta: initiateCall -->
+        <line class="seq-msg" x1="400" y1="308" x2="870" y2="308" stroke="#ff6b35" marker-end="url(#sa-orange)"/>
+        <text class="seq-msg-label" x="540" y="302">initiateCall(to, sdpOffer)</text>
+
+        <!-- 8: Server -> Browser: response -->
+        <line class="seq-msg" x1="400" y1="340" x2="130" y2="340" stroke="#a855f7" stroke-dasharray="4 3" marker-end="url(#sa-purple)"/>
+        <text class="seq-msg-label" x="150" y="334">{callId, token, sdpOffer, metaCallId}</text>
+
+        <!-- 9: Browser -> LiveKit: connect -->
+        <line class="seq-msg" x1="130" y1="368" x2="640" y2="368" stroke="#4d7cff" marker-end="url(#sa-blue)"/>
+        <text class="seq-msg-label" x="260" y="362">Room.connect(url, token) + publish mic</text>
+
+        <!-- ═══ PHASE 2: Answer ═══ -->
+        <rect class="seq-phase-bg" x="0" y="386" width="960" height="160" fill="#00d4aa"/>
+        <text class="seq-phase-label" x="14" y="404" fill="#00d4aa">FASE 2 — POST /call/:id/answer</text>
+
+        <!-- 10 -->
+        <line class="seq-msg" x1="130" y1="426" x2="400" y2="426" stroke="#a855f7" marker-end="url(#sa-purple)"/>
+        <text class="seq-msg-label" x="160" y="420">POST /call/:id/answer {sdpAnswer}</text>
+
+        <!-- 11: self — applyAnswer -->
+        <path class="seq-self-arrow" d="M400,450 L460,450 L460,470 L400,470" stroke="#00d4aa" marker-end="url(#sa-cyan)"/>
+        <text class="seq-msg-label" x="468" y="460">applyAnswer() → setRemoteDescription()</text>
+
+        <!-- 12: Server -> LiveKit: startRecording -->
+        <line class="seq-msg" x1="400" y1="496" x2="640" y2="496" stroke="#fbbf24" marker-end="url(#sa-yellow)"/>
+        <text class="seq-msg-label" x="420" y="490">startRecording(roomName, callId)</text>
+        <text class="seq-note" x="644" y="506">→ Egress OGG → S3</text>
+
+        <!-- 13: Server -> Browser: connected -->
+        <line class="seq-msg" x1="400" y1="536" x2="130" y2="536" stroke="#a855f7" stroke-dasharray="4 3" marker-end="url(#sa-purple)"/>
+        <text class="seq-msg-label" x="190" y="530">{status: "connected"}</text>
+
+        <!-- ═══ PHASE 3: Active Audio ═══ -->
+        <rect class="seq-phase-bg" x="0" y="556" width="960" height="190" fill="#4d7cff"/>
+        <text class="seq-phase-label" x="14" y="574" fill="#4d7cff">FASE 3 — Chamada Ativa (áudio bidirecional)</text>
+
+        <text class="seq-note" x="14" y="598">Browser → WhatsApp</text>
+
+        <!-- Browser -> LiveKit: mic -->
+        <line class="seq-msg" x1="130" y1="610" x2="640" y2="610" stroke="#4d7cff" marker-end="url(#sa-blue)"/>
+        <text class="seq-msg-label" x="290" y="604">audio track (mic WebRTC)</text>
+
+        <!-- LiveKit -> Server: PCM -->
+        <line class="seq-msg" x1="640" y1="636" x2="400" y2="636" stroke="#00d4aa" marker-end="url(#sa-cyan)"/>
+        <text class="seq-msg-label" x="430" y="630">trackSubscribed → PCM AudioStream</text>
+
+        <!-- Server -> Meta: Opus RTP -->
+        <line class="seq-msg" x1="400" y1="662" x2="870" y2="662" stroke="#ff6b35" marker-end="url(#sa-orange)"/>
+        <text class="seq-msg-label" x="520" y="656">Opus encode → RTP (werift)</text>
+
+        <text class="seq-note" x="14" y="694">WhatsApp → Browser</text>
+
+        <!-- Meta -> Server: RTP -->
+        <line class="seq-msg" x1="870" y1="706" x2="400" y2="706" stroke="#ff6b35" marker-end="url(#sa-orange)"/>
+        <text class="seq-msg-label" x="520" y="700">RTP Opus packets (werift)</text>
+
+        <!-- Server -> LiveKit: PCM -->
+        <line class="seq-msg" x1="400" y1="730" x2="640" y2="730" stroke="#00d4aa" marker-end="url(#sa-cyan)"/>
+        <text class="seq-msg-label" x="420" y="724">Opus decode → captureFrame(PCM)</text>
+
+        <!-- LiveKit -> Browser: remote audio -->
+        <line class="seq-msg" x1="640" y1="742" x2="130" y2="742" stroke="#4d7cff" marker-end="url(#sa-blue)"/>
+        <text class="seq-msg-label" x="280" y="738">remote audio track (bridge-audio)</text>
+
+        <!-- ═══ PHASE 4: Terminate ═══ -->
+        <rect class="seq-phase-bg" x="0" y="756" width="960" height="160" fill="#ff6b35"/>
+        <text class="seq-phase-label" x="14" y="774" fill="#ff6b35">FASE 4 — POST /call/:id/terminate</text>
+
+        <!-- Browser -> Server: terminate -->
+        <line class="seq-msg" x1="130" y1="798" x2="400" y2="798" stroke="#a855f7" marker-end="url(#sa-purple)"/>
+        <text class="seq-msg-label" x="175" y="792">POST /call/:id/terminate</text>
+
+        <!-- Server -> LiveKit: stopRecording -->
+        <line class="seq-msg" x1="400" y1="826" x2="640" y2="826" stroke="#fbbf24" marker-end="url(#sa-yellow)"/>
+        <text class="seq-msg-label" x="440" y="820">stopRecording(egressId)</text>
+
+        <!-- Server -> Meta: terminateCall -->
+        <line class="seq-msg" x1="400" y1="852" x2="870" y2="852" stroke="#ff6b35" marker-end="url(#sa-orange)"/>
+        <text class="seq-msg-label" x="540" y="846">terminateCall(metaCallId)</text>
+
+        <!-- Server self: cleanup -->
+        <path class="seq-self-arrow" d="M400,874 L460,874 L460,894 L400,894" stroke="#00d4aa" marker-end="url(#sa-cyan)"/>
+        <text class="seq-msg-label" x="468" y="884">pc.close() + room.disconnect()</text>
+
+        <!-- Server -> LiveKit: deleteRoom -->
+        <line class="seq-msg" x1="400" y1="906" x2="640" y2="906" stroke="#a855f7" marker-end="url(#sa-purple)"/>
+        <text class="seq-msg-label" x="450" y="900">deleteRoom(roomName)</text>
+
+        <!-- Server -> Browser: terminated (below lifelines) -->
+      </svg>
+      <div style="text-align:center; margin-top:8px; font-family:'Space Mono',monospace; font-size:11px; color:var(--text-dim);">
+        Server retorna <span style="color:var(--accent-purple)">{status: "terminated"}</span> ao Browser
+      </div>
+    </div>
+  </div>
+
+  <!-- File Map -->
+  <div class="file-map fade-in">
+    <h2>📁 Mapa de Arquivos</h2>
+    <div class="file-grid">
+      <div class="file-card">
+        <div>
+          <div class="file-name">src/server.ts</div>
+          <div class="file-desc">Express app: CORS, rotas REST, gerencia sessões em Map&lt;callId, CallSession&gt;.</div>
+        </div>
+      </div>
+      <div class="file-card">
+        <div>
+          <div class="file-name">src/call-bridge.ts</div>
+          <div class="file-desc">Core do bridge: rtc-node + werift + Opus encode/decode bidirecional.</div>
+        </div>
+      </div>
+      <div class="file-card">
+        <div>
+          <div class="file-name">src/livekit-manager.ts</div>
+          <div class="file-desc">RoomServiceClient: criar/deletar rooms, gerar tokens JWT com grants.</div>
+        </div>
+      </div>
+      <div class="file-card">
+        <div>
+          <div class="file-name">src/meta-api.ts</div>
+          <div class="file-desc">Fetch para Meta Graph API: connect (SDP offer) e terminate.</div>
+        </div>
+      </div>
+      <div class="file-card">
+        <div>
+          <div class="file-name">src/egress-manager.ts</div>
+          <div class="file-desc">EgressClient: room composite recording (OGG) para S3.</div>
+        </div>
+      </div>
+      <div class="file-card">
+        <div>
+          <div class="file-name">src/config.ts</div>
+          <div class="file-desc">Carrega .env, valida vars obrigatórias, exporta config tipado.</div>
+        </div>
+      </div>
+      <div class="file-card">
+        <div>
+          <div class="file-name">src/types.ts</div>
+          <div class="file-desc">CallStatus, CallSession, CallBridgeHandle e DTOs de resposta.</div>
+        </div>
+      </div>
+      <div class="file-card">
+        <div>
+          <div class="file-name">public/app.js</div>
+          <div class="file-desc">Client JS: conecta ao LiveKit, publica mic, gerencia fluxo SDP.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Tooltip -->
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+const data = {
+  browser: {
+    title: 'Browser (Test UI)',
+    desc: 'Página de teste em public/index.html + app.js. Conecta ao LiveKit como "browser-agent", publica microfone e reproduz áudio remoto via livekit-client@2.',
+    tech: ['livekit-client@2', 'Vanilla JS', 'WebRTC']
+  },
+  livekit: {
+    title: 'LiveKit Server',
+    desc: 'SFU (Selective Forwarding Unit) que gerencia salas WebRTC. Hospeda rooms, roteia mídia entre browser e bridge participants. Roda em Docker no modo dev.',
+    tech: ['WebRTC', 'Room API', 'JWT Auth', 'Docker']
+  },
+  express: {
+    title: 'Express Server',
+    desc: 'Orquestra todo o ciclo de vida da chamada. Gerencia sessões em memória (Map), cria rooms, gera tokens JWT e coordena bridge + Meta API. O Call Bridge roda no mesmo processo Node.js.',
+    tech: ['Express', 'TypeScript', 'REST', 'In-Memory State']
+  },
+  bridge: {
+    title: 'Call Bridge (mesmo processo)',
+    desc: 'Módulo interno ao Express Server — não é um serviço separado. createBridge() é chamado diretamente em server.ts. Participa do room como "bridge-agent", converte PCM ↔ Opus a 48kHz/mono/20ms.',
+    tech: ['@livekit/rtc-node', 'werift', '@discordjs/opus', 'PCM 48kHz']
+  },
+  meta: {
+    title: 'Meta Graph API',
+    desc: 'API REST do WhatsApp Business para chamadas de voz. Recebe SDP offer para iniciar chamada e suporta terminate. Não há webhook neste serviço.',
+    tech: ['HTTPS', 'SDP', 'Graph API']
+  },
+  whatsapp: {
+    title: 'Usuário WhatsApp',
+    desc: 'Usuário final que recebe a chamada de voz no WhatsApp. Mídia roteada pela infraestrutura Meta.',
+    tech: ['WhatsApp', 'WebRTC']
+  },
+  egress: {
+    title: 'LiveKit Egress',
+    desc: 'Serviço de gravação do LiveKit. Grava composite do room em formato OGG (audio only) e envia para S3. Requer S3 configurado.',
+    tech: ['EgressClient', 'Room Composite', 'OGG']
+  },
+  s3: {
+    title: 'S3 Bucket',
+    desc: 'Armazena gravações em recordings/{callId}/{room}-{time}.ogg. Requer S3_ACCESS_KEY, S3_SECRET e S3_BUCKET no .env.',
+    tech: ['S3', 'OGG Audio']
+  }
+};
+
+const tip = document.getElementById('tooltip');
+
+document.querySelectorAll('.node').forEach(n => {
+  n.addEventListener('mouseenter', () => {
+    const d = data[n.dataset.id];
+    if (!d) return;
+    tip.innerHTML = `<h3>${d.title}</h3><p>${d.desc}</p><div>${d.tech.map(t => `<span class="tech">${t}</span>`).join('')}</div>`;
+    tip.classList.add('visible');
+  });
+  n.addEventListener('mousemove', e => {
+    const r = tip.getBoundingClientRect();
+    tip.style.left = Math.min(e.clientX + 16, innerWidth - r.width - 20) + 'px';
+    tip.style.top = Math.min(e.clientY - 10, innerHeight - r.height - 20) + 'px';
+  });
+  n.addEventListener('mouseleave', () => tip.classList.remove('visible'));
+});
+</script>
+</body>
+</html>

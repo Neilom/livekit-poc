@@ -1,0 +1,4 @@
+keys:
+  devkey: dev-secret-key-that-is-at-least-32-characters-long
+redis:
+  address: redis:6379

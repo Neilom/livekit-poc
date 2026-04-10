@@ -1,10 +1,30 @@
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   livekit:
     image: livekit/livekit-server:latest
-    command: --dev
+    command: --dev --config /etc/livekit.yaml --node-ip 127.0.0.1
     ports:
       - "7880:7880"
       - "7881:7881"
       - "7882:7882/udp"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    depends_on:
+      - redis
+
+  egress:
+    image: livekit/egress:latest
+    network_mode: host
+    cap_add:
+      - SYS_ADMIN
     environment:
-      LIVEKIT_KEYS: "devkey: secret"
+      - EGRESS_CONFIG_FILE=/etc/egress.yaml
+    volumes:
+      - ./egress.yaml:/etc/egress.yaml:ro
+    depends_on:
+      - livekit
+      - redis

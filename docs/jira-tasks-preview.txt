@@ -1,0 +1,887 @@
+================================================================================
+PREVIEW DAS HISTORIAS JIRA — Epic SAL-715 (Voice Calling)
+Projeto: SAL (Sales) | Labels: voice-calling | Squad: Sales
+Tipo: História | Parent: SAL-715
+Total: 11 histórias | Fibonacci: 1,2,3,5,8
+================================================================================
+
+VCL = voice-calling-livekit
+VCA = voice-calling-adapter
+
+Referência:
+- Arquitetura de Ligação: https://omnichat.atlassian.net/wiki/spaces/AT/pages/3870785872
+- DT.3 Fazer Ligação: https://omnichat.atlassian.net/wiki/spaces/AT/pages/3921641475
+
+================================================================================
+              DECISÕES TÉCNICAS E CONTRATOS (REFERÊNCIA GLOBAL)
+================================================================================
+
+As seções abaixo documentam decisões que impactam múltiplas tarefas. Cada
+tarefa referencia esta seção quando relevante, evitando ambiguidade.
+
+--- CAMPO DE CORRELAÇÃO ENTRE SERVIÇOS ---
+
+O campo de correlação universal é o chatId. Ele é:
+- Enviado pelo web-app ao VCL no POST /call
+- Enviado pelo VCL ao VCA no POST /v1/calling (junto com o SDP offer)
+- Incluído pelo VCA nos eventos SNS publicados
+- Usado como chave primária no session store do VCL (Map<chatId, CallSession>)
+- Usado no nome da sala LiveKit: call-{chatId}
+- Usado no path S3 de gravação: recordings/{chatId}/{room_name}-{time}.ogg
+
+O VCL NÃO usa metaCallId. O VCA gerencia o metaCallId internamente (para
+comunicação com a Meta via chat-jobs → wab-omnichat-adapter) e o VCL nunca
+precisa recebê-lo ou armazená-lo. Toda correlação entre serviços é feita
+exclusivamente pelo chatId.
+
+--- FLUXO DE COMUNICAÇÃO: VCL → META (via cadeia existente) ---
+
+O VCL NÃO se comunica com a Meta diretamente. O fluxo de envio é:
+
+  VCL → VCA (HTTP) → chat-jobs (SQS) → wab-omnichat-adapter → Meta
+
+O fluxo de retorno (webhooks) é:
+
+  Meta → webhooks service → SNS ({env}-webhook-events) → VCA
+  VCA processa e publica no SNS de statuses → VCL (HTTP subscription)
+  VCA também notifica o web-app via socket
+
+O VCL se integra apenas com o VCA (HTTP + SNS). Nunca com chat-jobs,
+wab-omnichat-adapter ou Meta diretamente.
+
+--- CONTRATO: VCL → VCA (INICIAR CHAMADA) ---
+
+Rota existente no VCA (documentada na Arquitetura de Ligação):
+
+POST {VCA_BASE_URL}/v1/calling
+Headers:
+  Content-Type: application/json
+Body:
+  {
+    "chatId": "Kx12EQa6RsZ7",
+    "sdp": "v=0\r\no=- ..."
+  }
+Response 200:
+  {
+    "message": "Call initiated successfully"
+  }
+Response 4xx/5xx:
+  {
+    "error": "mensagem de erro"
+  }
+
+Nota: O campo é "sdp" (não "sdpOffer"). O VCA recebe e encaminha via
+chat-jobs → wab-omnichat-adapter → Meta Cloud API. O metaCallId retornado
+pela Meta (calls[0].id) fica interno ao VCA.
+
+--- CONTRATO: WEB-APP → VCA (TERMINAR CHAMADA) ---
+
+Rota existente no VCA:
+
+POST {VCA_BASE_URL}/v1/finish-calling
+Headers:
+  Content-Type: application/json
+Body:
+  {
+    "chatId": "Kx12EQa6RsZ7"
+  }
+Response 200:
+  {
+    "message": "Call finished successfully"
+  }
+
+Nota: O web-app chama esta rota diretamente. O VCL NÃO chama esta rota.
+
+--- CONTRATO: VCA → SNS (EVENTOS DE STATUS PARA O VCL) ---
+
+Fluxo: Meta envia webhooks → serviço webhooks da Omni → SNS
+({env}-webhook-events) → VCA processa no WebhookFactory
+(StatusBehaviorCalling) → VCA publica no SNS de statuses do voice.
+
+Tópico SNS: arn:aws:sns:{region}:{account}:voice-call-statuses
+O VCL expõe rota POST /sns como HTTP subscription endpoint.
+Valida assinatura SNS e faz subscription confirmation automática.
+
+Schema da mensagem SNS (campo "Message" é JSON stringificado):
+{
+  "eventType": "sdp_answer" | "ringing" | "accepted" | "rejected" | "completed" | "failed",
+  "chatId": "Kx12EQa6RsZ7",
+  "timestamp": "2025-01-15T10:30:00Z",
+  "payload": { ... }
+}
+
+Payloads por eventType (baseados nos webhooks reais da Meta):
+
+  eventType: "sdp_answer"
+  Origem Meta: webhook calls[] com event="connect", session.sdp_type="answer"
+  payload: {
+    "sdp": "v=0\r\no=- ..."
+  }
+
+  eventType: "ringing"
+  Origem Meta: webhook statuses[] com status="RINGING", type="call"
+  payload: {}
+  Nota: Informativo. O VCL pode logar mas não precisa agir. O VCA repassa
+  ao web-app via socket para atualizar o BottomSheet.
+
+  eventType: "accepted"
+  Origem Meta: webhook statuses[] com status="ACCEPTED", type="call"
+  payload: {}
+  Nota: Informativo para o VCL (a conexão já foi feita via sdp_answer).
+  O VCA repassa ao web-app via socket.
+
+  eventType: "rejected"
+  Origem Meta: webhook statuses[] com status="REJECTED", type="call"
+  payload: {}
+  Nota: Cliente recusou ou não atendeu. VCL faz cleanup da sessão.
+
+  eventType: "completed"
+  Origem Meta: webhook calls[] com event="terminate", status="COMPLETED"
+  payload: {
+    "duration": 37
+  }
+  Nota: Ligação finalizada pelo cliente. VCL faz cleanup da sessão.
+
+  eventType: "failed"
+  Origem Meta: webhook calls[] com event="terminate", status="FAILED"
+  payload: {
+    "errorCode": 138021,
+    "errorMessage": "WhatsApp client terminated the call due to not receiving any media for a long time."
+  }
+  Nota: Ligação falhou. VCL faz cleanup da sessão e loga o erro.
+
+Eventos que o VCL precisa processar (fazem ação):
+  - sdp_answer → applyAnswer no bridge + iniciar gravação
+  - rejected → cleanupSession
+  - completed → cleanupSession
+  - failed → cleanupSession + log de erro
+
+Eventos informativos (VCL pode ignorar, VCA repassa ao web-app via socket):
+  - ringing
+  - accepted
+
+Idempotência: O VCL usa o header x-amz-sns-message-id como chave. Se o
+mesmo messageId já foi processado, ignora. Campo lastSnsMessageId na sessão.
+
+--- SOCKET: VCA → WEB-APP (EVENTOS EM TEMPO REAL) ---
+
+O VCA já possui socket para o web-app. Os eventos de chamada que o VCA
+envia ao web-app via socket (já implementados / a implementar pelo VCA):
+  - Resposta do SDP (para o fluxo antigo sem LiveKit)
+  - RINGING → web-app atualiza BottomSheet para "tocando"
+  - ACCEPTED → web-app atualiza BottomSheet para "em chamada"
+  - REJECTED → web-app fecha BottomSheet, mostra feedback
+  - COMPLETED → web-app fecha BottomSheet, limpa estado
+  - FAILED → web-app fecha BottomSheet, mostra erro
+
+No fluxo LiveKit, o web-app usa esses mesmos sockets do VCA para feedback
+de status, MAS a conexão de áudio vem do LiveKit SDK (não do SDP via
+socket como no fluxo antigo).
+
+--- SESSION STORE ---
+
+Fase 1 (MVP): In-memory Map<chatId, CallSession> — o VCL roda com 1
+instância no ECS. Suficiente para validar o fluxo.
+
+Fase 2 (escalabilidade): Migrar para Redis (ElastiCache). O VCL já depende
+de Redis indiretamente (LiveKit usa Redis), então usar o mesmo cluster
+ElastiCache com prefixo de key diferente (vcl:session:{chatId}).
+
+Decisão: Abstrair desde o início com interface SessionStore (get, set,
+delete, findByChatId) e implementação InMemorySessionStore. Na fase 2,
+trocar por RedisSessionStore sem mudar o resto do código.
+
+Interface CallSession atualizada:
+{
+  chatId: string;
+  callId: string;           // UUID interno do VCL
+  roomName: string;         // call-{chatId}
+  status: CallStatus;       // creating | waiting_answer | active | terminated | error
+  createdAt: Date;
+  bridge: CallBridgeHandle | null;
+  egressId?: string;        // recebido após startRecording
+  lastSnsMessageId?: string; // para idempotência
+}
+
+--- CLEANUP E RACE CONDITIONS ---
+
+Problema: O agente clica em "desligar" (tarefa 5) ao mesmo tempo que o SNS
+de completed chega (tarefa 6). Ambos tentam cleanup.
+
+Solução: A função de cleanup é idempotente e centralizada:
+
+  async function cleanupSession(chatId: string, reason: string): Promise<boolean>
+    - Buscar sessão; se não existir ou status === "terminated", retorna false
+    - Marcar status = "terminated" IMEDIATAMENTE (evita duplo processamento)
+    - stopRecording (se egressId)
+    - bridge.terminate()
+    - deleteRoom
+    - Remover sessão do store
+    - Retorna true
+
+Tanto a rota POST /call/terminate quanto o handler SNS completed/rejected/
+failed chamam cleanupSession(). A primeira execução faz o trabalho; a
+segunda retorna false e é no-op.
+
+--- SESSÕES ÓRFÃS (GARBAGE COLLECTOR) ---
+
+Problema: Se o VCL crashar ou um evento SNS nunca chegar, a sessão fica
+pendente com room e bridge ativos.
+
+Solução: Timer periódico (setInterval a cada 60s) que varre o session store:
+- Sessões com status "waiting_answer" há mais de 2 minutos → cleanup
+- Sessões com status "active" há mais de 4 horas → cleanup
+- Log warning para cada sessão limpa
+
+Valores configuráveis via env vars:
+  SESSION_TIMEOUT_WAITING_MS=120000
+  SESSION_TIMEOUT_ACTIVE_MS=14400000
+  SESSION_GC_INTERVAL_MS=60000
+
+--- ICE GATHERING TIMEOUT ---
+
+Comportamento atual da POC: timeout de 10s → resolve com candidatos parciais.
+Comportamento em produção: manter o mesmo. Se ICE gathering não completar em
+10s, prosseguir com os candidatos disponíveis. Se o SDP offer resultante não
+tiver candidatos, retornar erro 500 ao web-app com mensagem clara.
+
+Verificação adicional após waitForIceGathering:
+  const finalSdp = pc.localDescription!.sdp;
+  if (!finalSdp.includes("a=candidate")) {
+    throw new Error("ICE gathering produced no candidates");
+  }
+
+--- GRAVAÇÃO LOCAL (DEV) vs IAM ROLE (PROD) ---
+
+Problema: Em produção, o Egress usa IAM Role (sem accessKey/secretKey). Mas
+em desenvolvimento local (docker-compose), não há IAM Role disponível.
+
+Solução:
+- egress-manager.ts: NÃO passar accessKey/secretKey no S3Upload
+- docker-compose (dev): Passar AWS_ACCESS_KEY_ID e AWS_SECRET_ACCESS_KEY
+  como env vars do container egress (o SDK da AWS resolve automaticamente)
+- ECS (prod): Task Role do Egress com s3:PutObject — o SDK resolve via
+  instance metadata
+- Config S3 no código: apenas { region, bucket } — sem credenciais
+- .env.example mantém S3_ACCESS_KEY e S3_SECRET_KEY para desenvolvimento,
+  mas o código não os usa diretamente; são passados ao container egress
+  via docker-compose environment
+
+--- NAMING DO PATH S3 ---
+
+Padrão: recordings/{chatId}/{roomName}-{timestamp}.ogg
+Exemplo: recordings/Kx12EQa6RsZ7/call-Kx12EQa6RsZ7-2025-01-15T103000.ogg
+
+A Lambda S3 (tarefa 9) extrai o chatId do path:
+  key.split("/")[1] → chatId
+
+O chatId é o campo usado para localizar a mensagem no banco do VCA.
+
+--- CODEC E COMPATIBILIDADE META ---
+
+A POC usa Opus (48kHz, 2ch no SDP, mono no bridge). A Meta Cloud API
+aceita Opus como codec primário para WebRTC calling. O SDP offer gerado
+pelo werift inclui opus/48000/2 (payload type 111), que é compatível.
+
+Confirmado pelo SDP answer real da Meta (documentado no DT.3):
+  a=rtpmap:111 opus/48000/2
+  a=fmtp:111 maxaveragebitrate=20000;maxplaybackrate=16000;...
+
+Se a Meta rejeitar o offer (eventType "failed"), o VCL deve logar o SDP
+offer e o erro para diagnóstico. Não há fallback automático de codec.
+
+--- FEATURE FLAG ---
+
+Sistema: Launch Darkly. Flag: voice-calling (já documentada na Arquitetura).
+A flag controla se a loja tem Voice Calling habilitado.
+
+Lógica no web-app:
+  if (featureFlags.voiceCalling) {
+    // POST para VCL + conectar LiveKit (novo fluxo)
+  } else {
+    // fluxo antigo via VCA (se existir)
+  }
+
+Além da feature flag, o usuário precisa ter a permissão allowVoiceCalling
+habilitada (configurada pelo administrador na tela de Usuários).
+
+--- SCHEMA DE MENSAGEM (callData) ---
+
+A mensagem de ligação já possui schema definido (documentado na Arquitetura):
+
+MESSAGE {
+  ...,
+  type: "VOICE_CALL",
+  callData: {
+    type: "VOICE_CALL",
+    status: "RINGING" | "REJECTED" | "ACCEPTED",
+    timestampsStatus: {
+      startedAt: number,
+      acceptedAt: number | null,
+      rejectedAt: number | null,
+      completedAt: number | null
+    },
+    durationSeconds: number,
+    feedback: {
+      callQualityScore: number,
+      callQualityComment: string,
+      agilityImpactScore: number,
+      agilityImpactComment: string
+    }
+  }
+}
+
+Para a gravação, adicionar no campo attachmentUrl da Message
+
+A Lambda S3 (tarefa 9) atualiza attachmentUrl na mensagem.
+O player de áudio (tarefa 8) verifica attachmentUrl para renderizar.
+
+--- AUTENTICAÇÃO E SEGURANÇA ---
+
+Web-app → VCL: O VCL fica na mesma VPC que o web-app backend. O request
+passa pelo backend (BFF), que já tem autenticação do agente. O VCL confia
+em requests vindos da rede interna. Se necessário, adicionar API key simples
+via header (X-API-Key) como camada extra.
+
+Token JWT LiveKit: TTL de 1h (já configurado na POC). Grants: roomJoin,
+canPublish, canSubscribe apenas para o room específico.
+
+Endpoint SNS: Valida assinatura AWS SNS (verificar certificado + signature).
+Usar pacote sns-validator ou verificação manual.
+
+--- OBSERVABILIDADE ---
+
+Logging: Manter console.log/warn/error existentes da POC. Em produção,
+adicionar formato JSON estruturado (pino ou winston) com campos:
+  { chatId, callId, event, duration_ms }
+
+Métricas (fase 2): Contadores de chamadas iniciadas, ativas, finalizadas,
+falhadas. Latência do bridge setup. Expor via /metrics (Prometheus).
+
+Tracing (fase 2): OpenTelemetry com spans para cada etapa do fluxo.
+
+--- RECONEXÃO DO BROWSER ---
+
+O LiveKit SDK tem reconnect automático (configurável). Se o browser
+desconectar temporariamente:
+- O bridge continua ativo (conexão werift ↔ Meta não é afetada)
+- O browser reconecta ao room e re-subscribe nos tracks
+- O áudio pode ter gap mas retoma automaticamente
+
+Se o browser ficar desconectado por mais de 60s, o LiveKit remove o
+participant. O garbage collector do VCL eventualmente limpa a sessão.
+
+Ponto de falha documentado na Arquitetura: "O usuário pode dar F5 na tela".
+Com LiveKit, o F5 causa desconexão do room mas o bridge continua ativo.
+O agente pode reconectar fazendo novo POST para o VCL com o mesmo chatId
+(o VCL retorna o token existente se a sessão ainda estiver ativa).
+
+--- TESTES ---
+
+Testes unitários: Para cada módulo (session-store, cleanup, SNS handler).
+Mock do LiveKit SDK e werift para testes isolados.
+
+Testes de integração: Docker-compose com LiveKit + Redis + VCL. Simular
+eventos SNS via HTTP POST direto na rota /sns.
+
+Testes E2E: Manual na primeira fase. Usar a test page existente (public/)
+adaptada para enviar chatId em vez de "to".
+
+Simulação do SDP answer: POST direto na rota /sns com body de evento
+sdp_answer contendo SDP answer real (capturado de uma chamada Meta de teste,
+exemplo disponível no DT.3).
+
+
+================================================================================
+                          INICIAR A LIGAÇÃO
+================================================================================
+
+--------------------------------------------------------------------------------
+[1/11] [web-app] Service do livekit
+--------------------------------------------------------------------------------
+Prioridade: Alto
+Depende de: 2 (rota do VCL precisa existir)
+Paraleliza com: —
+
+Descrição:
+Fazer um service exclusivo para o livekit
+
+
+--------------------------------------------------------------------------------
+[1.1/11] [web-app] Iniciar ligação via LiveKit
+--------------------------------------------------------------------------------
+Prioridade: Alto
+Depende de: 2 (rota do VCL precisa existir)
+Paraleliza com: —
+
+Descrição:
+O usuário vao clicar em ligar. O web-app inicia o fluxo de chamada outbound via
+voice-calling-livekit.
+
+Escopo técnico:
+- Pegar o livekitUrl a partir de uma variável de ambiente (env do web-app)
+- Enviar POST para o VCL com apenas { chatId } no body
+  - Rota: POST {VCL_BASE_URL}/call/initiate
+  - Response: { token }
+- Com o token retornado pelo VCL, conectar o browser ao room do LiveKit
+  usando livekit-client SDK (Room.connect com o token)
+- Abrir o BottomSheet de "conectando" enquanto aguarda a chamada ser
+  estabelecida
+- Transição de status do BottomSheet conforme eventos socket do VCA:
+  - "conectando" → ao fazer o POST
+- Controlar via Feature Flag: Launch Darkly flag "voice-calling-record"
+  (ver seção "Feature Flag")
+- Tratamento de erro: se o POST retornar 4xx/5xx, mostrar toast de erro e
+  não abrir BottomSheet
+
+Critérios de aceite:
+- Com FF ativa e permissão do usuário, o POST vai para o VCL
+- Browser conecta no room LiveKit e publica mic como participant
+- BottomSheet de "conectando" aparece imediatamente após o POST
+- BottomSheet atualiza para "tocando" / "em chamada" conforme sockets VCA
+- Com FF desativada, fluxo antigo continua inalterado
+- Erro no POST mostra feedback visual ao agente
+
+--------------------------------------------------------------------------------
+[2/11] [VCL] Rota POST para iniciar ligação (chatId → sala + bridge + token)
+--------------------------------------------------------------------------------
+Prioridade: Alto
+Depende de: —
+Paraleliza com: 10, 11 (infra)
+
+Descrição:
+Criar a rota principal do VCL que recebe o chatId, cria a sala LiveKit,
+monta o bridge de áudio (werift ↔ rtc-node), envia o SDP offer para o VCA
+pela rota existente e retorna o token para o browser.
+
+Escopo técnico:
+- Nova rota POST /call/initiate — body: { chatId }
+- Questão de auth do parse
+- Validar presença do chatId
+- Rejeitar se já existir sessão ativa para o mesmo chatId (409 Conflict)
+- Criar room no LiveKit com nome call-{chatId}
+  usando createRoom() de livekit-manager.ts
+- Chamar createBridge(roomName) que:
+  - Conecta bridge-agent ao room (rtc-node)
+  - Cria PeerConnection werift + SDP offer
+  - Aguarda ICE gathering (~10s timeout)
+  - Se SDP não contiver candidatos, throw Error (ver seção ICE Gathering)
+- Enviar SDP offer para o VCA:
+  - POST {VCA_BASE_URL}/v1/calling (ver seção "Contrato: VCL → VCA")
+  - Body: { chatId, sdp: finalSdp }
+  - Verificar response 200; em caso de erro, abort com cleanup
+- Gerar token JWT para o browser (generateToken com identity "browser-agent")
+- Salvar sessão no Redis:
+  { chatId, callId (UUID), roomName, status: "waiting_answer", bridge,
+    createdAt }
+- Retornar: { token }
+- Em caso de erro em qualquer etapa: cleanup parcial (deletar room se
+  criado, desconectar bridge se conectado) e retornar 500
+
+Config adicional (env vars):
+  VCA_BASE_URL=https://vca.internal.example.com
+
+Referência do código existente (POC):
+- server.ts: POST /call/start (linhas 32-78) — adaptar para receber chatId
+  em vez de "to", remover retorno de sdpOffer para o front
+- call-bridge.ts: createBridge() — reutilizar quase inteiro
+- livekit-manager.ts: createRoom(), generateToken() — sem mudanças
+
+O que muda em relação ao POC:
+- Entrada é chatId (não "to" com número de telefone)
+- VCL não chama Meta diretamente; envia SDP para VCA em POST /v1/calling
+- Campo é "sdp" (não "sdpOffer") para manter compatibilidade com o VCA
+- Não retorna sdpOffer para o front (fica interno)
+- Adicionar verificação de ICE candidates no SDP
+- Adicionar cleanup parcial em caso de erro
+- Implementar SessionStore abstrato (ver seção Session Store)
+
+Critérios de aceite:
+- POST com chatId cria sala e retorna token válido
+- POST com chatId que já tem sessão ativa retorna 409
+- Bridge-agent aparece no room do LiveKit
+- SDP offer é enviado ao VCA via POST /v1/calling com sucesso
+- Sessão fica como "waiting_answer" até receber o SDP answer via SNS
+- Em caso de falha no VCA, room e bridge são limpos
+
+--------------------------------------------------------------------------------
+[3/11] [VCL] Listener SNS — receber SDP answer e iniciar gravação
+--------------------------------------------------------------------------------
+Prioridade: Alto
+Depende de: 2
+Paraleliza com: 10, 11 (infra)
+
+Descrição:
+O VCA recebe o webhook no SNS de statuses com o SDP answer.
+O VCL escuta esse tópico SNS e, quando chega o answer, aplica no bridge para
+completar a conexão WebRTC e inicia a gravação via Egress.
+
+Escopo técnico:
+- Vai assinar um SQS no SNS 
+- Para type offer && sdp.type === "answer":
+  - Buscar pelo chatId no parseMessage a partir da messageId
+  - Buscar a sessão no Redis
+  - Se não encontrar ou status !== "waiting_answer", ignorar (log warning)
+  - Chamar bridge.applyAnswer(payload.sdp)
+    - normalizeSdp() já existe no call-bridge.ts
+    - O SDP answer da Meta vem com \r\n literais (confirmado no DT.3)
+  - Marcar sessão como "active"
+  - Iniciar gravação: chamar startRecording(roomName, chatId)
+    - Egress: RoomCompositeEgress → arquivo .ogg no S3
+    - Path S3: retailerId:{retailerId}/chatId:{chatId}/messageId-{messageId}.ogg
+    - egress-manager.ts: S3Upload apenas com { region, bucket }
+      (seção IAM Role)
+    - Se gravação falhar: log error e interromper a chamada
+    - Salvar egressId na sessão
+- Ignorar eventTypes "rejected" e "completed" nesta tarefa (tratados
+  na tarefa 6)
+
+Config adicional (env vars):
+  SNS_TOPIC_ARN=arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${self:provider.stage}-wab-omnichat-adapter-calling
+
+Referência do código existente (POC):
+- server.ts: POST /call/:callId/answer (linhas 81-112) — lógica de
+  applyAnswer + startRecording; agora disparado pelo SNS em vez de POST
+- egress-manager.ts: startRecording() — remover S3Upload com credenciais
+  explícitas, usar apenas { region, bucket } para Role-based auth
+
+Critérios de aceite:
+- Subscription confirmation funciona automaticamente na primeira request
+- SDP answer chega via SNS e é aplicado automaticamente 
+- Conexão WebRTC entre bridge e Meta se estabelece (áudio bidirecional)
+- Gravação inicia em S3 
+- Egress usa IAM Role
+_________________________________________________(precisamos adicionar uma tarefa aqui)
+- Falha na gravação interrompe a chamada 
+- Evento failed dispara cleanup da sessão
+
+
+================================================================================
+                          TERMINAR A LIGAÇÃO
+================================================================================
+
+--------------------------------------------------------------------------------
+[4/11] [web-app] Terminar ligação e desconectar
+--------------------------------------------------------------------------------
+Prioridade: Alto
+Depende de: 1
+Paraleliza com: 5, 6
+
+Descrição:
+O usuário clica em desligar. O web-app encerra a chamada nos dois serviços
+e desconecta do LiveKit.
+
+Escopo técnico:
+- Enviar POST para o VCL: POST {VCL_BASE_URL}/call/terminate
+  Body: { chatId }
+  Response 200: { status: "terminated" }
+- Desconectar do room LiveKit (room.disconnect())
+- Atualizar UI: fechar BottomSheet, voltar ao estado normal
+
+Critérios de aceite:
+- Sala LiveKit é encerrada (bridge desconecta, room deletado)
+- Browser não fica com conexão WebRTC pendente
+- UI volta ao estado normal mesmo se um dos POSTs falhar
+- Duplo clique no botão desligar não causa erro
+
+--------------------------------------------------------------------------------
+[5/11] [VCL] Rota POST para terminar ligação (chatId)
+--------------------------------------------------------------------------------
+Prioridade: Alto
+Depende de: 2
+Paraleliza com: 4, 6
+
+Descrição:
+Rota que recebe chatId e limpa tudo no lado LiveKit: para gravação,
+termina bridge, deleta sala e manda para o VCA para terminar a ligação.
+
+Escopo técnico:
+- Nova rota POST /call/terminate — body: { chatId }
+- Chamar cleanupSession(chatId, "agent_hangup")
+  (ver seção "Cleanup e Race Conditions")
+- Se retornar true: retornar 200 { status: "terminated" }
+- Chamar o VCA para finalizar a chamada na Meta com a rota já existente
+
+Nota: cleanupSession é a mesma função usada pela tarefa 6 (SNS completed),
+garantindo que a lógica de cleanup está centralizada e idempotente.
+
+Referência do código existente (POC):
+- server.ts: POST /call/:callId/terminate (linhas 115-153) — extrair
+  lógica para cleanupSession() e adaptar para buscar por chatId
+
+Critérios de aceite:
+- Gravação para e arquivo .ogg é finalizado no S3
+- Bridge werift é fechado, room LiveKit deletado
+- Sessão removida do Redis
+
+--------------------------------------------------------------------------------
+[6/11] [VCL] Listener SNS — ligação finalizada, desconectar da sala
+--------------------------------------------------------------------------------
+Prioridade: Alto
+Depende de: 3 (mesmo listener SNS, evento diferente)
+Paraleliza com: 4, 5
+
+Descrição:
+Quando o cliente do WhatsApp desliga, a Meta notifica o VCA via webhook,
+que publica no SNS. O VCL escuta e faz cleanup automático.
+
+Escopo técnico:
+- No mesmo handler SNS (da tarefa 3), tratar eventos adicionais:
+
+  eventType === "completed":
+    - Busca pelo Message a partir do messageId
+    - Buscar sessão pelo chatId
+    - cleanupSession(chatId, "remote_hangup")
+    - Se cleanup retornar false, apenas logar (sessão já limpa)
+
+  eventType === "rejected":
+    - Busca pelo Message a partir do messageId
+    - Buscar sessão pelo chatId
+    - cleanupSession(chatId, "call_rejected")
+    - Log: chamada recusada/não atendida pelo cliente
+
+- Reutiliza cleanupSession() da tarefa 5 (mesma função, trigger diferente)
+- Eventos desconhecidos: log warning e ignorar
+
+Critérios de aceite:
+- Cliente WhatsApp desliga (completed) → sala LiveKit encerrada automaticamente
+- Cliente rejeita/não atende chamada (rejected) → cleanup automático
+- Gravação é finalizada corretamente mesmo sem o agente clicar desligar
+- Sem vazamento de recursos (rooms, bridges, tracks)
+
+
+================================================================================
+                  AO RECEBER SOCKET DE LIGAÇÃO FINALIZADA
+================================================================================
+
+--------------------------------------------------------------------------------
+[7/11] [web-app] Desconectar da sala ao receber socket de finalização
+--------------------------------------------------------------------------------
+Prioridade: Médio
+Depende de: 4
+Paraleliza com: —
+
+Descrição:
+Quando o VCA envia evento de ligação finalizada via socket (cliente
+desligou), o web-app deve desconectar do room LiveKit e atualizar a UI.
+
+Escopo técnico:
+- Escutar eventos de socket existentes do VCA:
+  - COMPLETED → cliente desligou
+  - REJECTED → cliente recusou/não atendeu
+  - FAILED → chamada falhou
+- Ao receber qualquer um: room.disconnect(), fechar BottomSheet, limpar estado
+- O socket do VCA já existe e os eventos continuam os mesmos — não há
+  tarefa no VCA para isso
+- Verificar se o room já está desconectado (para evitar erro se o agente
+  já clicou em desligar antes do socket chegar)
+
+Critérios de aceite:
+- Quando cliente desliga via WhatsApp, o browser desconecta automaticamente
+- UI volta ao estado normal sem ação do agente
+- Não gera erro se chamada já foi encerrada pelo agente
+
+
+================================================================================
+               SALVAR LINK DO ÁUDIO NA MENSAGEM
+================================================================================
+
+--------------------------------------------------------------------------------
+[8/11] [web-app] Player de áudio na mensagem
+--------------------------------------------------------------------------------
+Prioridade: Médio
+Depende de: 9 (precisa ter URL salva na msg)
+Paraleliza com: —
+
+Descrição:
+Quando a mensagem de ligação (type: VOICE_CALL) tiver uma attachmentUrl de áudio
+(gravação), mostrar um player de áudio inline na conversa.
+
+Escopo técnico:
+- Verificar se a mensagem possui campo attachmentUrl 
+- Renderizar componente de audio player para reproduzir a gravação
+- Formato esperado: .ogg (Opus) — compatível com <audio> nativo dos
+  browsers modernos
+- O attachmentUrl será uma presigned URL do S3 (gerada pela Lambda, validade
+  de 7 dias — ver decisão na tarefa 9)
+- O player de áudio aparece dentro do componente de mensagem de ligação conforme figma
+
+Critérios de aceite:
+- Mensagem VOICE_CALL com attachmentUrl mostra player de áudio
+- Player reproduz o .ogg sem download manual
+- Mensagem sem attachmentUrl continua renderizando normalmente
+- URL expirada mostra fallback amigável
+
+--------------------------------------------------------------------------------
+[9/11] [VCA] Lambda S3 — salvar URL do áudio na mensagem
+--------------------------------------------------------------------------------
+Prioridade: Médio
+Depende de: 11 (S3 precisa estar configurado com trigger)
+Paraleliza com: —
+
+Descrição:
+Quando o Egress finaliza a gravação e salva o .ogg no S3, um evento S3
+dispara uma Lambda no VCA que salva a URL do áudio na mensagem
+correspondente.
+
+Escopo técnico:
+- Criar Lambda function no contexto do VCA
+- Runtime: Node.js 20 (padrão do VCA)
+- Trigger: S3 ObjectCreated no bucket, 
+- A Lambda recebe o evento S3, extrai:
+  - bucket: event.Records[0].s3.bucket.name
+  - key: event.Records[0].s3.object.key
+  - A Lambda precisa de IAM Role com s3:GetObject no bucket
+  - Se não encontrar: log error e retornar (não falhar a Lambda)
+- Atualizar mensagem: setar attachmentUrl = URL
+- Da pra extrair as informações da propria URL, como retailer, chatId e messageId
+
+
+Decisão sobre URL:
+- Usar URL pública
+
+Critérios de aceite:
+- Arquivo novo no S3 → Lambda é invocada
+- Lambda extrai messageId do path e encontra a mensagem
+- attachmentUrl é salva na mensagem
+- Erros logados (msg não encontrada, formato inesperado, etc.)
+- Lambda é idempotente (se rodar 2x para o mesmo arquivo, não duplica)
+
+
+================================================================================
+                        INFRA DO VCL
+================================================================================
+
+--------------------------------------------------------------------------------
+[10/11] [infra] Tasks ECS separadas: LiveKit Server, Egress e VCL
+--------------------------------------------------------------------------------
+Prioridade: Alto
+Depende de: —
+Paraleliza com: 11
+
+Descrição:
+Cada componente precisa escalar de forma independente. O LiveKit Server,
+o Egress worker e o VCL devem rodar em task definitions separadas no ECS.
+
+Escopo técnico:
+- Task definition 1: LiveKit Server (livekit/livekit-server)
+  - Portas: 7880 (WS), 7881 (TCP), 7882 (UDP/WebRTC)
+  - Config via livekit.yaml montado (EFS ou inline no task definition)
+  - Depende de Redis (ElastiCache)
+  - IMPORTANTE: Precisa de EC2 launch type (não Fargate) para suporte
+    a UDP e network mode host. Alternativamente, usar Fargate com NLB
+    para UDP — consultar DevOps sobre viabilidade
+  - O LiveKit Server precisa de IP público (ou NLB público) para que
+    browsers externos conectem via WebRTC
+  - Env vars: LIVEKIT_CONFIG (YAML inline) ou volume mount
+- Task definition 2: Egress (livekit/egress)
+  - Precisa de acesso ao LiveKit (ws_url) e Redis
+  - IAM Task Role com s3:PutObject no bucket de recordings
+  - cap_add: SYS_ADMIN (Chrome headless interno do Egress)
+  - IMPORTANTE: SYS_ADMIN capability requer EC2 launch type (não
+    disponível em Fargate). Confirmar com DevOps
+  - network_mode: host (como no docker-compose) — requer EC2
+- Task definition 3: VCL (voice-calling-livekit)
+  - Pode rodar em Fargate (não tem requisitos especiais)
+  - Acesso ao LiveKit (WS interno), VCA (HTTP), SNS subscription
+  - Health check: GET /health (adicionar rota simples no server.ts)
+  - Env vars: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET,
+    VCA_BASE_URL, SNS_TOPIC_ARN, S3_REGION, S3_BUCKET
+- Service discovery:
+  - LiveKit Server: registrar no Cloud Map (AWS Service Discovery)
+    Nome interno: livekit.voice.internal → resolve para IP do container
+  - O VCL e Egress usam esse DNS para LIVEKIT_URL
+  - Alternativa: ALB/NLB interno com DNS fixo
+  - Consultar DevOps para definir padrão
+- Redis: Usar ElastiCache existente se disponível. Se não, criar
+  cluster Redis dedicado (single-node para MVP, cluster para prod).
+  O LiveKit e Egress usam o mesmo Redis.
+- Security Groups:
+  - LiveKit: inbound 7880 (WS) de VCL + browsers, 7881 (TCP) interno,
+    7882 (UDP) de internet (WebRTC)
+  - Egress: outbound para LiveKit, S3, Redis
+  - VCL: inbound 3000 (HTTP) de ALB, outbound para LiveKit, VCA, SNS
+
+Critérios de aceite:
+- Cada componente escala independentemente
+- LiveKit acessível pelo VCL e pelo browser (URL pública para WebRTC)
+- Egress conecta no LiveKit e grava no S3
+- VCL conecta no LiveKit, no VCA e no SNS
+- Health checks funcionais para cada task
+
+--------------------------------------------------------------------------------
+[11/11] [infra] Configurar S3 para Egress + trigger Lambda do VCA
+--------------------------------------------------------------------------------
+Prioridade: Alto
+Depende de: —
+Paraleliza com: 10
+
+Descrição:
+Bucket S3 para gravações do Egress, com evento de ObjectCreated
+configurado para disparar a Lambda do VCA.
+
+Escopo técnico:
+- Bucket S3: já criado dentro do cloudformation
+- S3 Event Notification: ObjectCreated com
+  suffix .ogg → dispara Lambda do VCA (tarefa 9)
+- Lifecycle policy:
+  - Transição para S3 Infrequent Access após 30 dias
+  - Expiração após 365 dias (alinhar com produto — retenção legal?)
+  - Configurável via Terraform/CloudFormation
+- CORS: NÃO necessário (presigned URLs funcionam sem CORS para
+  reprodução via <audio>). Se no futuro precisar de range requests
+  para seek no player, adicionar CORS nesse momento.
+
+Critérios de aceite:
+- Egress grava .ogg no S3 usando IAM Role (sem credenciais no código)
+- Arquivo novo no S3 e suffix .ogg dispara Lambda
+- Lambda recebe evento com bucket e key corretos
+- Lifecycle policy configurada (IA após 30d, expiração após 365d)
+
+
+================================================================================
+RESUMO POR SERVIÇO
+================================================================================
+
+voice-calling-livekit (VCL): 4 histórias, 16 SP
+  [2] Rota POST iniciar (5) + [3] SNS answer (5) + [5] Rota POST terminar (3)
+  + [6] SNS finalizada (3)
+
+web-app: 4 histórias, 9 SP
+  [1] Iniciar ligação (3) + [4] Terminar ligação (2) + [7] Socket disconnect (1)
+  + [8] Player de áudio (3)
+
+voice-calling-adapter (VCA): 1 história, 5 SP
+  [9] Lambda S3 → salvar URL (5)
+
+infra: 2 histórias, 8 SP
+  [10] Tasks ECS separadas (5) + [11] S3 + trigger Lambda (3)
+
+TOTAL: 11 histórias, 38 SP
+
+================================================================================
+ORDEM DE EXECUÇÃO / DEPENDÊNCIAS
+================================================================================
+
+Fase A — Core (iniciar chamada):
+  [2] VCL: rota POST iniciar .............. 5 SP  (sem dependência)
+  [3] VCL: SNS answer + gravação .......... 5 SP  (depende de 2)
+  [1] web-app: iniciar ligação ............. 3 SP  (depende de 2)
+
+Fase B — Core (terminar chamada):
+  [5] VCL: rota POST terminar .............. 3 SP  (depende de 2)
+  [6] VCL: SNS finalizada .................. 3 SP  (depende de 3)
+  [4] web-app: terminar ligação ............ 2 SP  (depende de 5)
+  [7] web-app: socket disconnect ........... 1 SP  (depende de 4)
+
+Fase C — Gravação / áudio:
+  [9] VCA: Lambda S3 ....................... 5 SP  (depende de 11)
+  [8] web-app: player de áudio ............. 3 SP  (depende de 9)
+
+Fase D — Infra (pode começar a qualquer momento):
+  [10] infra: tasks ECS separadas .......... 5 SP  (sem dependência)
+  [11] infra: S3 + trigger Lambda .......... 3 SP  (sem dependência)
+
+================================================================================
+FIM DO PREVIEW
+================================================================================

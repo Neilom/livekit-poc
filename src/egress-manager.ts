@@ -17,18 +17,16 @@ const egressClient = new EgressClient(
 );
 
 function isS3Configured(): boolean {
-  return !!(config.s3.accessKey && config.s3.secret && config.s3.bucket);
+  return !!config.s3.bucket;
 }
 
 export async function startRecording(roomName: string, callId: string): Promise<string | null> {
   if (!isS3Configured()) {
-    console.warn("[egress] S3 not configured, skipping recording");
+    console.warn("[egress] S3 bucket not configured, skipping recording");
     return null;
   }
 
   const s3 = new S3Upload({
-    accessKey: config.s3.accessKey,
-    secret: config.s3.secret,
     region: config.s3.region,
     bucket: config.s3.bucket,
   });
